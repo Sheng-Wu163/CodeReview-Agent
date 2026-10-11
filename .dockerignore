@@ -1,0 +1,10 @@
+.git
+.env
+specs
+CLAUDE.md
+*.md
+!go.sum
+.idea
+.vscode
+*.log
+pgdata

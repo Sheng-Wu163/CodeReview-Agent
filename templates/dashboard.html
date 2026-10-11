@@ -1,0 +1,21 @@
+{{define "content"}}
+<p class="muted">Review history, newest first. Click an ID for details.</p>
+<table>
+  <thead>
+    <tr><th>ID</th><th>Repository</th><th>PR</th><th>Status</th><th>Findings</th><th>Created</th></tr>
+  </thead>
+  <tbody>
+    {{range .Reviews}}
+    <tr>
+      <td><a href="/dashboard/reviews/{{.ID}}">{{.ID}}</a></td>
+      <td>{{.RepoFullName}}</td>
+      <td>#{{.PRNumber}}</td>
+      <td>{{.Status}}</td>
+      <td>{{index $.Counts .ID}}</td>
+      <td class="muted">{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{if not .Reviews}}<p>No reviews yet.</p>{{end}}
+{{end}}

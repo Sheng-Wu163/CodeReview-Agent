@@ -1,0 +1,28 @@
+{{define "content"}}
+<p><a href="/dashboard">&larr; Back to list</a></p>
+<h2>{{.Review.RepoFullName}} #{{.Review.PRNumber}} <span class="muted">({{.Review.Status}})</span></h2>
+<p class="muted">
+  Head SHA: <code>{{.Review.HeadSHA}}</code>
+  {{if .Review.Summary}} &middot; {{.Review.Summary}}{{end}}
+  {{if .Review.UpdatedAt}} &middot; Updated {{.Review.UpdatedAt.Format "2006-01-02 15:04"}}{{end}}
+</p>
+<h3>Findings</h3>
+<table>
+  <thead>
+    <tr><th>Agent</th><th>Severity</th><th>Location</th><th>Message</th><th>Suggestion</th><th>Confidence</th></tr>
+  </thead>
+  <tbody>
+    {{range .Findings}}
+    <tr>
+      <td>{{.Agent}}</td>
+      <td class="sev-{{.Severity}}">{{.Severity}}</td>
+      <td><code>{{.FilePath}}:{{.LineNumber}}</code></td>
+      <td>{{.Message}}</td>
+      <td>{{.Suggestion}}</td>
+      <td>{{printf "%.2f" .Confidence}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{if not .Findings}}<p>No findings for this review.</p>{{end}}
+{{end}}

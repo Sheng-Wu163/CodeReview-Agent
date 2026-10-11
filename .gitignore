@@ -1,0 +1,24 @@
+# Secrets
+.env
+*.pem
+*.key
+
+# Build artifacts
+bin/
+dist/
+*.exe
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local data
+pgdata/
+*.log

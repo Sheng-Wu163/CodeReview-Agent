@@ -1,0 +1,232 @@
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
+
+	"codereviewagent/internal/db"
+	"codereviewagent/internal/repository"
+)
+
+const dashboardTestDatabaseURL = "postgres://postgres:postgres123@localhost:5432/codereviewagent?sslmode=disable"
+
+// newDashboardHarness sets up a migrated database, a dashboard handler and
+// a chi server, returning the server and a cleanup function.
+func newDashboardHarness(t *testing.T) (*httptest.Server, *repository.ReviewRepo) {
+	t.Helper()
+
+	if os.Getenv("SKIP_DB_TESTS") == "1" {
+		t.Skip("SKIP_DB_TESTS is set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := db.Connect(ctx, dashboardTestDatabaseURL)
+	if err != nil {
+		t.Skipf("test database unavailable: %v", err)
+	}
+	if err := db.Migrate(ctx, pool); err != nil {
+		pool.Close()
+		t.Fatalf("migrate: %v", err)
+	}
+	repo := repository.NewReviewRepo(pool)
+
+	dashboard, err := NewDashboard(repo, zap.NewNop(), "../../templates")
+	if err != nil {
+		pool.Close()
+		t.Fatalf("NewDashboard: %v", err)
+	}
+	r := chi.NewRouter()
+	dashboard.Register(r)
+	server := httptest.NewServer(r)
+	t.Cleanup(func() {
+		server.Close()
+		pool.Close()
+	})
+	return server, repo
+}
+
+// seedReview inserts a review with findings and returns the review ID.
+func seedReview(t *testing.T, repo *repository.ReviewRepo, repoFullName string, prNumber int) int64 {
+	t.Helper()
+	ctx := context.Background()
+	id, err := repo.CreateReview(ctx, &repository.Review{
+		RepoFullName: repoFullName, PRNumber: prNumber, HeadSHA: "sha-" + repoFullName,
+		Status: "completed", Summary: "test review",
+	})
+	if err != nil {
+		t.Fatalf("CreateReview: %v", err)
+	}
+	for _, f := range []repository.Finding{
+		{ReviewID: id, Agent: "security", Severity: "critical", FilePath: "a.go", LineNumber: 1,
+			Message: "SQL injection", Suggestion: "parameterize", Confidence: 0.95},
+		{ReviewID: id, Agent: "logic", Severity: "warning", FilePath: "b.go", LineNumber: 2,
+			Message: "unhandled error", Confidence: 0.8},
+	} {
+		if _, err := repo.CreateFinding(ctx, &f); err != nil {
+			t.Fatalf("CreateFinding: %v", err)
+		}
+	}
+	return id
+}
+
+func TestDashboardAPIListReviews(t *testing.T) {
+	server, repo := newDashboardHarness(t)
+	id := seedReview(t, repo, "ac18/list", 11)
+
+	resp, err := http.Get(server.URL + "/api/reviews")
+	if err != nil {
+		t.Fatalf("GET /api/reviews: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Reviews []apiReview `json:"reviews"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found *apiReview
+	for i := range body.Reviews {
+		if body.Reviews[i].ID == id {
+			found = &body.Reviews[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("seeded review %d not in response: %+v", id, body.Reviews)
+	}
+	if found.RepoFullName != "ac18/list" || found.PRNumber != 11 {
+		t.Errorf("review = %+v, want ac18/list #11", found)
+	}
+	if found.FindingsCount != 2 {
+		t.Errorf("FindingsCount = %d, want 2", found.FindingsCount)
+	}
+}
+
+func TestDashboardAPIDetail(t *testing.T) {
+	server, repo := newDashboardHarness(t)
+	id := seedReview(t, repo, "ac18/detail", 12)
+
+	resp, err := http.Get(server.URL + fmt.Sprintf("/api/reviews/%d", id))
+	if err != nil {
+		t.Fatalf("GET /api/reviews/%d: %v", id, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Review   apiReview    `json:"review"`
+		Findings []apiFinding `json:"findings"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Review.ID != id || body.Review.RepoFullName != "ac18/detail" {
+		t.Errorf("review = %+v", body.Review)
+	}
+	if len(body.Findings) != 2 {
+		t.Fatalf("findings = %d, want 2", len(body.Findings))
+	}
+	if body.Findings[0].Severity != "critical" || body.Findings[0].Confidence <= 0 || body.Findings[0].Confidence > 1 {
+		t.Errorf("findings[0] = %+v, want critical first with confidence in (0,1]", body.Findings[0])
+	}
+	if body.Findings[0].Message != "SQL injection" {
+		t.Errorf("findings[0].Message = %q, want SQL injection", body.Findings[0].Message)
+	}
+}
+
+func TestDashboardAPINotFound(t *testing.T) {
+	server, _ := newDashboardHarness(t)
+
+	resp, err := http.Get(server.URL + "/api/reviews/99999999")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestDashboardAPIInvalidID(t *testing.T) {
+	server, _ := newDashboardHarness(t)
+
+	resp, err := http.Get(server.URL + "/api/reviews/notanumber")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestDashboardListPage(t *testing.T) {
+	server, repo := newDashboardHarness(t)
+	id := seedReview(t, repo, "ac19/page", 13)
+
+	resp, err := http.Get(server.URL + "/dashboard")
+	if err != nil {
+		t.Fatalf("GET /dashboard: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	page, _ := io.ReadAll(resp.Body)
+	html := string(page)
+	for _, want := range []string{"ac19/page", "#13", "Review history", "/dashboard/reviews/"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("dashboard page missing %q", want)
+		}
+	}
+	_ = id
+}
+
+func TestDashboardDetailPage(t *testing.T) {
+	server, repo := newDashboardHarness(t)
+	id := seedReview(t, repo, "ac20/page", 14)
+
+	resp, err := http.Get(server.URL + fmt.Sprintf("/dashboard/reviews/%d", id))
+	if err != nil {
+		t.Fatalf("GET detail: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	page, _ := io.ReadAll(resp.Body)
+	html := string(page)
+	for _, want := range []string{"ac20/page", "#14", "SQL injection", "unhandled error", "sev-critical", "0.95"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("detail page missing %q", want)
+		}
+	}
+}
+
+func TestDashboardDetailPageNotFound(t *testing.T) {
+	server, _ := newDashboardHarness(t)
+
+	resp, err := http.Get(server.URL + "/dashboard/reviews/99999999")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}

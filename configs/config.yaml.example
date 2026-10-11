@@ -1,0 +1,24 @@
+# CodeReviewAgent configuration example.
+# Copy to configs/config.yaml and adjust. Environment variables
+# (SERVER_PORT, WEBHOOK_SECRET, GITHUB_TOKEN, DATABASE_URL, LLM_PROVIDER,
+# OPENAI_API_KEY, ANTHROPIC_API_KEY) override these values.
+
+server_port: "8080"
+webhook_secret: ""
+github_token: ""
+database_url: "postgres://localhost:5432/codereviewagent?sslmode=disable"
+llm_provider: "openai"
+openai_api_key: ""
+anthropic_api_key: ""
+
+# Files excluded from review (FR-04).
+filter:
+  exclude_dirs: ["vendor", "third_party", "node_modules"]
+  exclude_patterns:
+    - "*_generated.go"
+    - "*.pb.go"
+    - "*.pb.gw.go"
+    - "*.md"
+    - "go.sum"
+    - "package-lock.json"
+    - "yarn.lock"
