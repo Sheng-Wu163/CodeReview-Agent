@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/tmc/langchaingo/llms"
-	ltools "github.com/tmc/langchaingo/tools"
 	"go.uber.org/zap"
 
 	"codereviewagent/internal/ai/agents"
@@ -38,7 +37,7 @@ type mockAgent struct {
 
 func (m *mockAgent) Name() string { return m.name }
 
-func (m *mockAgent) Review(_ context.Context, _ []diff.FileDiff, _ []ltools.Tool) ([]agents.AgentFinding, error) {
+func (m *mockAgent) Review(_ context.Context, _ agents.ReviewInput) ([]agents.AgentFinding, error) {
 	m.mu.Lock()
 	m.calls++
 	m.mu.Unlock()
@@ -60,7 +59,7 @@ type mockVerifier struct {
 	calls    int
 }
 
-func (m *mockVerifier) Verify(_ context.Context, findings []agents.AgentFinding, _ []diff.FileDiff) ([]agents.VerifiedFinding, error) {
+func (m *mockVerifier) Verify(_ context.Context, findings []agents.AgentFinding, _ agents.ReviewInput) ([]agents.VerifiedFinding, error) {
 	m.calls++
 	return m.verified, nil
 }

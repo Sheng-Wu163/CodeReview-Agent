@@ -27,6 +27,8 @@ type Config struct {
 	AnthropicAPIKey string `mapstructure:"anthropic_api_key"`
 	// Filter holds the file exclusion rules used before review (FR-04).
 	Filter FilterConfig `mapstructure:"filter"`
+	// StaticAnalysis configures the pre-analysis pipeline (FR-24).
+	StaticAnalysis StaticAnalysisConfig `mapstructure:"static_analysis"`
 }
 
 // FilterConfig configures which files are excluded from review.
@@ -37,6 +39,64 @@ type FilterConfig struct {
 	// ExcludePatterns lists glob patterns (path.Match) matched against the
 	// full path and the base file name, e.g. "*.md", "go.sum".
 	ExcludePatterns []string `mapstructure:"exclude_patterns"`
+}
+
+// StaticAnalysisConfig configures the pre-review static analysis pipeline
+// (FR-24). Every knob is controllable from config.yaml.
+type StaticAnalysisConfig struct {
+	// Enabled turns the whole pipeline on/off. When disabled, agents run
+	// without preFindings (pure LLM review).
+	Enabled bool `mapstructure:"enabled"`
+	// Workers is the max number of concurrent analyzer executions (FR-19,
+	// default 4).
+	Workers int `mapstructure:"workers"`
+	// PerFileTimeoutSeconds bounds each tool run on each file (FR-19,
+	// default 30).
+	PerFileTimeoutSeconds int `mapstructure:"per_file_timeout_seconds"`
+	// SemgrepRulesDir is the custom semgrep rule directory, relative to the
+	// review workspace.
+	SemgrepRulesDir string `mapstructure:"semgrep_rules_dir"`
+	// GolangciConfigPath optionally points to a golangci-lint config file.
+	GolangciConfigPath string `mapstructure:"golangci_config_path"`
+	// Tools toggles the individual analyzers (FR-20 degradation).
+	Tools StaticAnalysisTools `mapstructure:"tools"`
+}
+
+// StaticAnalysisTools holds per-tool enable switches.
+type StaticAnalysisTools struct {
+	// Semgrep toggles the semgrep security scanner.
+	Semgrep StaticToolToggle `mapstructure:"semgrep"`
+	// GolangciLint toggles the golangci-lint quality scanner.
+	GolangciLint StaticToolToggle `mapstructure:"golangci_lint"`
+	// Gitleaks toggles the embedded secret scanner.
+	Gitleaks StaticGitleaksConfig `mapstructure:"gitleaks"`
+}
+
+// StaticToolToggle is a simple enable switch.
+type StaticToolToggle struct {
+	// Enabled runs the tool when true.
+	Enabled bool `mapstructure:"enabled"`
+}
+
+// StaticGitleaksConfig configures the secret scanner including custom rules
+// (FR-18).
+type StaticGitleaksConfig struct {
+	// Enabled runs the secret scanner when true.
+	Enabled bool `mapstructure:"enabled"`
+	// CustomRules extend the gitleaks default ruleset.
+	CustomRules []StaticGitleaksRule `mapstructure:"custom_rules"`
+}
+
+// StaticGitleaksRule is one user-defined secret rule.
+type StaticGitleaksRule struct {
+	// ID is the rule identifier reported in findings.
+	ID string `mapstructure:"id"`
+	// Description is a human-readable explanation.
+	Description string `mapstructure:"description"`
+	// Pattern is the regular expression matching the secret.
+	Pattern string `mapstructure:"pattern"`
+	// Keywords are quick pre-filter strings.
+	Keywords []string `mapstructure:"keywords"`
 }
 
 // Load reads configuration from the optional YAML file at configPath and
@@ -53,6 +113,14 @@ func Load(configPath string) (*Config, error) {
 		"*_generated.go", "*.pb.go", "*.pb.gw.go", "*.md",
 		"go.sum", "package-lock.json", "yarn.lock",
 	})
+	v.SetDefault("static_analysis.enabled", true)
+	v.SetDefault("static_analysis.workers", 4)
+	v.SetDefault("static_analysis.per_file_timeout_seconds", 30)
+	v.SetDefault("static_analysis.semgrep_rules_dir", "rules/semgrep")
+	v.SetDefault("static_analysis.golangci_config_path", "")
+	v.SetDefault("static_analysis.tools.semgrep.enabled", true)
+	v.SetDefault("static_analysis.tools.golangci_lint.enabled", true)
+	v.SetDefault("static_analysis.tools.gitleaks.enabled", true)
 
 	// Environment variable bindings. BindEnv ensures that Unmarshal picks up
 	// environment values even for keys that are absent from the YAML file.

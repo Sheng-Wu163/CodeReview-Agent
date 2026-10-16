@@ -26,10 +26,22 @@ services:
       WEBHOOK_SECRET: ${WEBHOOK_SECRET}
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     ports:
       - "8080:8080"
+
+  smee:
+    image: node:20-alpine
+    depends_on:
+      - app
+    command: >
+      npx --yes smee-client
+      --url ${WEBHOOK_PROXY_URL}
+      --path /webhook
+      --port 8080
+      --host app
 
 volumes:
   pgdata:

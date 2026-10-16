@@ -90,6 +90,7 @@ func run() error {
 		func(root string) orchestrator.Verifier {
 			return agents.NewVerifier(tools.ReadFileTool{Root: root}, nil)
 		}, nil)
+	orch.SetAnalysisConfig(cfg.StaticAnalysis)
 	ghClient := github.NewClient(cfg.GitHubToken)
 	pipeline := orchestrator.NewPipeline(orch, ghClient, store, cfg.GitHubToken, logger)
 	reviewProc = eventProcessorAdapter{pipeline: pipeline}

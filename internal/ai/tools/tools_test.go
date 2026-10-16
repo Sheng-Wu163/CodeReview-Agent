@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -283,52 +282,12 @@ func TestGetFunctionDefTool(t *testing.T) {
 	}
 }
 
-func TestRunStaticAnalysisToolCommandNotInstalled(t *testing.T) {
-	root := newWorkspace(t)
-	tool := RunStaticAnalysisTool{
-		Root:    root,
-		Command: "definitely-not-installed-linter-xyz",
-		Args:    []string{"run"},
-	}
-
-	out, err := tool.Call(context.Background(), "")
-	if err != nil {
-		t.Fatalf("Call: %v", err)
-	}
-	if !strings.Contains(out, notAvailableNotice) {
-		t.Errorf("Call = %q, want fallback notice %q", out, notAvailableNotice)
-	}
-}
-
-func TestRunStaticAnalysisToolSuccessfulRun(t *testing.T) {
-	root := newWorkspace(t)
-
-	var command string
-	var args []string
-	switch runtime.GOOS {
-	case "windows":
-		command, args = "cmd", []string{"/c", "echo", "lint output here"}
-	default:
-		command, args = "echo", []string{"lint output here"}
-	}
-
-	tool := RunStaticAnalysisTool{Root: root, Command: command, Args: args}
-	out, err := tool.Call(context.Background(), "")
-	if err != nil {
-		t.Fatalf("Call: %v", err)
-	}
-	if !strings.Contains(out, "lint output here") {
-		t.Errorf("Call = %q, want command output", out)
-	}
-}
-
 func TestAllToolsImplementToolInterface(t *testing.T) {
 	root := newWorkspace(t)
 	all := []tools.Tool{
 		ReadFileTool{Root: root},
 		SearchCodeTool{Root: root},
 		GetFunctionDefTool{Root: root},
-		RunStaticAnalysisTool{Root: root},
 	}
 	for _, tool := range all {
 		if tool.Name() == "" {

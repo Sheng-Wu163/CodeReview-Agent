@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -100,6 +101,17 @@ func (m *mockStore) UpdateReviewStatus(_ context.Context, id int64, status, summ
 	if s := summary; s != nil {
 		m.reviews[id].Summary = *s
 	}
+	return nil
+}
+
+func (m *mockStore) UpdateReviewPreFindings(_ context.Context, id int64, preFindings string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rev := m.reviews[id]
+	if rev == nil {
+		return fmt.Errorf("review %d not found", id)
+	}
+	rev.PreFindings = preFindings
 	return nil
 }
 

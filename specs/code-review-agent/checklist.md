@@ -65,3 +65,67 @@
 - [ ] AC-29: 执行 `golangci-lint run ./...` 无 error 级别问题
 - [ ] AC-30: 执行 `go test ./... -race` 全部通过
 - [ ] AC-31: 执行 `go vet ./...` 无输出
+
+## v1.3 静态分析管道验收
+
+### 功能性验收
+
+- [x] AC-32: Given 变更文件中包含 `const apiKey = "sk-xxxxx"`, When 静态分析管道运行, Then gitleaks 返回至少 1 条 critical 发现，且 finding.Tool 为 "gitleaks"
+  - ✅ `internal/integration/e2e_test.go` TestE2EMixedProblemPR（自定义规则 `openai-style-key`）+ `gitleaks_test.go`
+- [x] AC-33: Given 变更文件中包含 `db.Query("SELECT * FROM users WHERE id = " + userID)`, When 静态分析管道运行, Then Semgrep 返回至少 1 条 critical 发现，且 finding.RuleID 包含 "sql-injection"
+  - ✅ e2e 断言 `byTool["semgrep"][0].Severity == "critical"` 且 RuleID 含 "sql-injection"
+- [x] AC-34: Given 变更文件中包含未处理的 `json.Unmarshal` 错误, When 静态分析管道运行, Then golangci-lint 返回至少 1 条 warning 发现
+  - ✅ e2e 断言 errcheck/handler.go warning；另有 `golangci_test.go` 单测
+- [x] AC-35: Given 一个包含上述三种问题的 PR, When 完整审查流程运行, Then 三个工具的发现全部出现在 preFindings 中，且按 FilePath 分组
+  - ✅ e2e：两个 Agent 收到完全一致的 preFindings；管道按 FilePath 分组（`pipeline_test.go` TestPipelineGroupsByFile）
+
+### 并行与超时验收
+
+- [x] AC-36: Given 3 个测试文件 + 3 个分析器, When 管道运行, Then 总耗时不超过单个分析器耗时的 1.5 倍（验证并行有效）
+  - ✅ `pipeline_test.go` TestPipelineRunsAnalyzersInParallel
+- [x] AC-37: Given 一个 mock 分析器睡眠 60 秒, When 管道运行, Then 30 秒后该分析器超时返回 error，管道继续处理其他分析器
+  - ✅ `pipeline_test.go` TestPipelinePerFileTimeout
+
+### 降级策略验收
+
+- [x] AC-38: Given Semgrep CLI 未安装, When 管道运行, Then 安全 Agent 仍可执行（走纯 LLM 审查），日志记录 "semgrep not available"
+  - ✅ `semgrep_test.go` 二进制缺失路径 + orchestrator 管道失败降级（FR-20）
+- [x] AC-39: Given golangci-lint CLI 未安装, When 管道运行, Then 规范 Agent 仍可执行（走纯 LLM 审查），日志记录 "golangci-lint not available"
+  - ✅ `golangci_test.go` TestGolangciLintAnalyzerBinaryNotInstalled
+- [x] AC-40: Given 所有三个分析器均不可用, When 管道运行, Then 不阻塞审查流程，Agent 走纯 LLM 审查，日志记录完整降级信息
+  - ✅ e2e TestE2EDegradedAllToolsDisabled + orchestrator step 3.5 降级日志
+
+### 接口与集成验收
+
+- [x] AC-41: Given 一个包含 SQL 注入的测试 PR, When 安全 Agent 执行, Then Agent 输出中至少有一条 finding 的 ID 与某个 preFinding 的 ID 一致（验证 Agent 引用了静态分析结果）
+  - ✅ `agents/security_test.go` TestSecurityAgentPromptContainsPreFindings（T20 验收）+ e2e AC-41 断言（cited ID 必须存在于 preFindings）
+- [x] AC-42: Given 一个包含 SQL 注入的测试 PR, When 安全 Agent 执行, Then Agent 不再调用 `run_static_analysis` 工具（工具已被移除）
+  - ✅ `internal/ai/tools/static_analysis.go` 已删除；工具集仅剩 read_file/search_code/get_function_definition（`tools_test.go`）
+- [x] AC-43: Given 完整审查流程, When 检查数据库记录, Then `reviews` 表中保存了 preFindings 的完整快照（用于后续评估）
+  - ✅ migration `002_add_pre_findings.sql`（JSONB 列）+ `UpdateReviewPreFindings` + pipeline.Process 持久化 + `review_repo_test.go` TestUpdateReviewPreFindings
+
+### 配置验收
+
+- [x] AC-44: Given `configs/config.yaml` 中 `static_analysis.enabled = false`, When 审查流程运行, Then 跳过静态分析，Agent 走纯 LLM 审查
+  - ✅ e2e TestE2EDegradedAllToolsDisabled（Enabled=false → 注入 0 条 preFindings）
+- [x] AC-45: Given `configs/config.yaml` 中 `static_analysis.parallel_workers = 1`, When 管道运行, Then 分析器串行执行
+  - ✅ e2e 主测试使用 Workers=1 串行执行通过；`TestNewPipelineRespectsConfigToggles`
+
+### 代码质量验收
+
+- [x] AC-46: 执行 `golangci-lint run ./...` 无 error 级别问题
+  - ✅ 0 个 error 级别问题（剩余 20 条均为 warning 级：unused-parameter、deferred Close 等历史风格问题，v1.2 起已存在）
+- [ ] AC-47: 执行 `go test ./... -race` 全部通过
+  - ⚠️ 本机无 gcc（`-race` 依赖 cgo），无法执行；已执行 `go test ./...` 全量通过。请在具备 gcc 的环境中补充执行
+- [x] AC-48: 执行 `go vet ./...` 无输出
+  - ✅ vet: 0
+- [x] AC-49: `internal/analysis/` 下所有导出函数和类型均有文档注释
+  - ✅ 全部导出符号带 doc comment，`go vet`/revive 无 exported 注释告警
+
+## 迭代交付清单
+
+- [x] git tag `v1.3-start` 已打（迭代启动前）
+- [x] 所有 AC-32 ~ AC-49 通过（AC-47 受环境限制，见上文说明）
+- [x] `spec.md` 的 CHANGELOG 已更新（v1.3 行改为实际日期）
+- [x] `specs/code-review-agent/spec.md` 已更新至 v1.3 状态
+- [ ] git tag `v1.3-complete` 已打（迭代完成）← 由用户人工执行

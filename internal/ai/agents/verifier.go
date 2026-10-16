@@ -48,12 +48,14 @@ type dedupeKey struct {
 }
 
 // Verify runs the three verification steps and returns the surviving
-// findings, deduplicated and with calibrated confidence.
-func (v *Verifier) Verify(ctx context.Context, findings []AgentFinding, diffs []diff.FileDiff) ([]VerifiedFinding, error) {
+// findings, deduplicated and with calibrated confidence. The review input
+// supplies the diff ranges (line validation) and the preFindings the
+// agents were asked to verify.
+func (v *Verifier) Verify(ctx context.Context, findings []AgentFinding, input ReviewInput) ([]VerifiedFinding, error) {
 	// Step 1: line number validation (drop findings outside diff ranges).
 	valid := make([]AgentFinding, 0, len(findings))
 	for _, f := range findings {
-		if !lineInDiff(f, diffs) {
+		if !lineInDiff(f, input.Diffs) {
 			continue
 		}
 		valid = append(valid, f)

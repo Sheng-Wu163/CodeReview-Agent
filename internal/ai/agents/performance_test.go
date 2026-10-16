@@ -44,7 +44,7 @@ func TestPerformanceAgentDetectsStringConcatInLoop(t *testing.T) {
 	}
 	agent := NewPerformanceAgent(mock)
 
-	findings, err := agent.Review(context.Background(), stringConcatDiff(), securityAgentTools(t))
+	findings, err := agent.Review(context.Background(), reviewInput(t, stringConcatDiff(), nil))
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestPerformanceAgentPromptContent(t *testing.T) {
 	mock := &mockLLM{response: "Final Answer: []"}
 	agent := NewPerformanceAgent(mock)
 
-	if _, err := agent.Review(context.Background(), stringConcatDiff(), securityAgentTools(t)); err != nil {
+	if _, err := agent.Review(context.Background(), reviewInput(t, stringConcatDiff(), nil)); err != nil {
 		t.Fatalf("Review: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func TestPerformanceAgentNoFindings(t *testing.T) {
 	mock := &mockLLM{response: "Thought: fine\nFinal Answer: []"}
 	agent := NewPerformanceAgent(mock)
 
-	findings, err := agent.Review(context.Background(), stringConcatDiff(), securityAgentTools(t))
+	findings, err := agent.Review(context.Background(), reviewInput(t, stringConcatDiff(), nil))
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}

@@ -179,3 +179,117 @@ T10 + T11 + T12 → T13 → T14
 - **依赖**：T3, T12
 - **预估**：4h
 - **状态**：✅ 已完成
+
+## 阶段五：v1.3 静态分析管道（T15-T21）
+
+### T15: PreAnalysisFinding 类型定义与指纹生成
+- **描述**：定义 `PreAnalysisFinding` 结构体和稳定指纹生成函数。指纹规则：`<tool>:<ruleID>:<filePath>:<line>`。提供 `MarshalPreFindings` / `UnmarshalPreFindings` 用于序列化
+- **文件路径**：
+  - `internal/analysis/types.go`
+  - `internal/analysis/fingerprint.go`
+  - `internal/analysis/fingerprint_test.go`
+- **完成标准**：
+  - `go build ./...` 通过
+  - 指纹生成测试覆盖：同一输入产生相同指纹、不同行号产生不同指纹、空字段处理
+  - 序列化/反序列化往返测试通过
+- **依赖**：T1
+- **预估**：2h
+- **状态**：✅ 已完成
+
+### T16: gitleaks 集成（Secret Scanner）
+- **描述**：集成 gitleaks 作为库（`github.com/gitleaks/gitleaks/v8`），对单个文件执行扫描，输出 `[]PreAnalysisFinding`。启用默认规则集，支持通过配置扩展自定义规则
+- **文件路径**：
+  - `internal/analysis/gitleaks.go`
+  - `internal/analysis/gitleaks_test.go`
+- **完成标准**：
+  - 对包含 `const apiKey = "sk-xxxxx"` 的测试文件，返回至少 1 条 critical 发现
+  - 对不含密钥的正常 Go 文件，返回 0 条发现
+  - 编译期断言 `var _ Analyzer = GitleaksAnalyzer{}` 通过
+- **依赖**：T15
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T17: golangci-lint 集成
+- **描述**：通过 exec 调用 golangci-lint CLI，使用 `--out-format=json` 输出，解析为 `[]PreAnalysisFinding`。如果 golangci-lint 未安装或调用失败，返回 error 而非 panic
+- **文件路径**：
+  - `internal/analysis/golangci.go`
+  - `internal/analysis/golangci_test.go`
+  - `.golangci.yml`（项目根目录，供 golangci-lint 使用）
+- **完成标准**：
+  - 对包含未处理错误的测试文件，返回至少 1 条 warning 发现
+  - 对未安装 golangci-lint 的环境，返回明确的 error 信息
+  - JSON 解析器单元测试通过（使用固定的 fixture）
+- **依赖**：T15
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T18: Semgrep 集成与自定义规则
+- **描述**：通过 exec 调用 Semgrep CLI，使用 `--json` 输出，解析为 `[]PreAnalysisFinding`。项目根目录提供 `rules/semgrep/` 目录存放自定义规则（至少包含 SQL 注入、命令注入两条规则）
+- **文件路径**：
+  - `internal/analysis/semgrep.go`
+  - `internal/analysis/semgrep_test.go`
+  - `rules/semgrep/sql-injection.yml`
+  - `rules/semgrep/command-injection.yml`
+- **完成标准**：
+  - 对包含 `db.Query("SELECT * FROM users WHERE id = " + userID)` 的测试文件，返回至少 1 条 critical 发现
+  - 对未安装 Semgrep 的环境，返回明确的 error 信息
+  - JSON 解析器单元测试通过
+- **依赖**：T15
+- **预估**：4h
+- **状态**：✅ 已完成
+
+### T19: 静态分析管道编排
+- **描述**：实现 `Pipeline`，对 `[]diff.FileDiff` 运行三个分析器，使用 `errgroup` 控制并发（worker 数可配置），每个工具对每个文件设置 30s 超时。结果合并、去重（基于指纹）后按文件路径分组返回
+- **文件路径**：
+  - `internal/analysis/pipeline.go`
+  - `internal/analysis/pipeline_test.go`
+  - `internal/config/config.go`（新增 static_analysis 段落）
+  - `configs/config.yaml.example`（新增配置示例）
+- **完成标准**：
+  - 对 3 个测试文件，三个分析器并行运行（总耗时接近最慢的单个分析器，而非累加）
+  - 超时测试通过（mock 一个睡眠 60s 的分析器，验证 30s 超时后返回）
+  - 降级测试通过（关闭某个分析器，管道正常返回其他分析器的结果）
+  - 去重测试通过（两个分析器报告同一处问题时合并为一条）
+- **依赖**：T16, T17, T18, T4
+- **预估**：5h
+- **状态**：✅ 已完成
+
+### T20: ReviewAgent 接口改造与 Prompt 注入
+- **描述**：
+  1. 修改 `ReviewAgent` 接口，`Review` 方法新增 `PreFindings []PreAnalysisFinding` 参数（或改为 `ReviewInput` 结构体参数）
+  2. 修改所有四个审查 Agent 和验证 Agent，适配新签名
+  3. 修改所有 Agent 的 User message 模板，新增"静态分析发现"段落
+  4. 修改 System prompt，明确指示 Agent 聚焦于"验证 + 补充"
+  5. 从工具注册表中移除 `run_static_analysis` 工具，删除 `internal/ai/tools/static_analysis.go`
+- **文件路径**：
+  - `internal/ai/agents/*.go`（五个文件）
+  - `internal/ai/prompts/*.txt`（五个文件）
+  - `internal/ai/tools/static_analysis.go`（删除）
+  - `internal/orchestrator/orchestrator.go`
+- **完成标准**：
+  - `go build ./...` 通过
+  - `go vet ./...` 无输出
+  - 每个 Agent 的单元测试通过（使用 mock preFindings）
+  - 集成测试：给定包含 SQL 注入的测试 diff + 对应的 preFindings，安全 Agent 输出的 finding 中引用了 preFindings 的 ID
+- **依赖**：T19, T7, T8, T9, T10, T11
+- **预估**：6h
+- **状态**：✅ 已完成
+
+### T21: v1.3 集成测试与交付
+- **描述**：
+  1. 编写端到端集成测试：模拟一个包含硬编码密钥、SQL 注入、未处理错误的 PR，验证完整流程
+  2. 更新 `specs/code-review-agent/spec.md`，将 CHANGELOG 中 v1.3 一行改为实际完成日期
+  3. 更新 `specs/code-review-agent/checklist.md`，将 v1.3 的所有 AC 标记为通过
+  4. 提示用户执行 `git tag -a v1.3-complete -m "..."`
+- **文件路径**：
+  - `internal/integration/e2e_test.go`
+  - `specs/code-review-agent/spec.md`（CHANGELOG 更新）
+  - `specs/code-review-agent/checklist.md`（状态更新）
+- **完成标准**：
+  - 端到端测试通过
+  - CHANGELOG 更新完成
+  - checklist 状态更新完成
+  - 输出提示："v1.3 交付完成，请执行 git tag v1.3-complete"
+- **依赖**：T20
+- **预估**：3h
+- **状态**：✅ 已完成

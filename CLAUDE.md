@@ -134,3 +134,87 @@ codereviewagent/
 | `ANTHROPIC_API_KEY` | Anthropic API Key | 当 LLM_PROVIDER=anthropic 时 |
 | `DATABASE_URL` | PostgreSQL 连接字符串 | 是 |
 | `SERVER_PORT` | HTTP 端口（默认 8080） | 否 |
+
+## Git Tag 规范（v1.3 起生效）
+
+### 命名规范
+
+| tag 名称 | 执行时点 | 执行者 |
+|---------|---------|-------|
+| `v<X.Y>-start` | 迭代启动前，spec 三件套已更新但代码未动 | 人工 |
+| `v<X.Y>-complete` | checklist.md 全部通过后 | 人工 |
+| `v<X.Y>-rollback-<reason>` | 需要回滚到某个中间状态时 | 人工 |
+
+### Coding Agent 的行为边界
+
+- **禁止**执行 `git tag` 命令
+- **禁止**执行 `git push --tags`
+- 每个任务的完成标准验证通过后，**不自动提醒**打 tag
+- 只有在**迭代最后一个任务（checklist 全部通过）** 完成后，才提醒用户："v<X.Y> 交付完成，请执行 `git tag v<X.Y>-complete -m '...'`"
+- 如果发现当前迭代的某个任务失败并需要回滚，提示用户："建议创建 tag `v<X.Y>-rollback-<reason>` 记录当前状态后再回滚"
+
+### 每个新迭代的启动流程
+
+用户在每个新迭代启动时，按顺序执行：
+1. 更新 `specs/code-review-agent/spec.md`（追加 v 章节 + CHANGELOG）
+2. 更新 `specs/code-review-agent/tasks.md`（追加 T 任务）
+3. 更新 `specs/code-review-agent/checklist.md`（追加 AC + 迭代交付清单）
+4. 更新 `CLAUDE.md`（如有规范变化）
+5. 人工审阅三件套
+6. 执行 `git tag -a v<X.Y>-start -m "<迭代主题>启动"`
+7. 通知 Coding Agent "三件套已审批，开始执行 T<N>"
+
+## v1.3 编码规范
+
+### 静态分析模块
+
+- 所有分析器必须实现统一接口：`var _ Analyzer = XxxAnalyzer{}`
+- 分析器通过 exec 调用外部 CLI 时，必须使用 `context.WithTimeout` 控制超时
+- 分析器返回的 `error` 必须包含工具名称和失败原因，例如 `fmt.Errorf("golangci-lint: parse JSON: %w", err)`
+- 所有外部 CLI 的调用必须通过 `config.StaticAnalysis.Tools.Xxx.Enabled` 开关控制
+
+### Prompt 模板
+
+- Agent 的 User message 模板必须包含段落标题 `## 静态分析发现`，其下为 preFindings 的结构化列表
+- System prompt 必须明确指示 Agent："静态分析发现是确定性工具的已知问题列表，你的任务是验证这些发现的真实性，并补充静态分析无法覆盖的语义问题"
+- Prompt 模板存放于 `internal/ai/prompts/*.txt`，不硬编码在 Go 代码中
+
+### 指纹生成
+
+- 指纹生成函数必须是**纯函数**（相同输入产生相同输出，无副作用）
+- 指纹格式严格为 `<tool>:<ruleID>:<filePath>:<line>`，不允许添加额外字段
+- 如果后续需要修改指纹格式，必须走变更提案机制（创建 `specs/changes/` 目录下的提案文件）
+
+## v1.3 接口冻结声明
+
+以下接口在 v1.3 完成后冻结，后续模块不得直接修改：
+
+```go
+type PreAnalysisFinding struct {
+    ID       string
+    Tool     string
+    RuleID   string
+    FilePath string
+    Line     int
+    EndLine  int
+    Severity string
+    Message  string
+    Snippet  string
+}
+
+type ReviewInput struct {
+    Diffs       []diff.FileDiff
+    PreFindings []PreAnalysisFinding
+    Tools       []tools.Tool
+}
+
+type Analyzer interface {
+    Name() string
+    Analyze(ctx context.Context, file diff.FileDiff) ([]PreAnalysisFinding, error)
+}
+```
+
+如后续模块需要扩展这些结构（如新增字段），必须：
+1. 创建变更提案：`specs/changes/<change-id>/proposal.md`
+2. 描述改动原因、影响范围、迁移方案
+3. 人工审批通过后才可修改

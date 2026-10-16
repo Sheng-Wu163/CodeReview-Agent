@@ -13,6 +13,7 @@ import (
 	"github.com/tmc/langchaingo/tools"
 
 	"codereviewagent/internal/ai/prompts"
+	"codereviewagent/internal/analysis"
 	"codereviewagent/internal/diff"
 )
 
@@ -50,14 +51,27 @@ type AgentFinding struct {
 	Confidence float64 `json:"confidence"`
 }
 
+// ReviewInput bundles everything a review agent needs for one run
+// (FR-21). The struct shape is FROZEN as of v1.3 (spec 11.3).
+type ReviewInput struct {
+	// Diffs are the changed files under review.
+	Diffs []diff.FileDiff
+	// PreFindings are the deterministic static analysis findings produced
+	// by the pre-analysis pipeline (FR-17), injected into the prompt
+	// (FR-22).
+	PreFindings []analysis.PreAnalysisFinding
+	// Tools are the context-collection tools available to the agent
+	// (FR-11).
+	Tools []tools.Tool
+}
+
 // ReviewAgent is the uniform interface implemented by every review agent
 // (see CLAUDE.md).
 type ReviewAgent interface {
 	// Name returns the agent identifier, e.g. "security".
 	Name() string
-	// Review runs the agent over the given file diffs, using the supplied
-	// context-collection tools.
-	Review(ctx context.Context, diffs []diff.FileDiff, agentTools []tools.Tool) ([]AgentFinding, error)
+	// Review runs the agent over the given review input.
+	Review(ctx context.Context, input ReviewInput) ([]AgentFinding, error)
 }
 
 // reviewAgent is the shared ReAct-based implementation used by all review
@@ -77,10 +91,11 @@ func newReviewAgent(name, promptFile string, llm llms.Model) reviewAgent {
 // Name implements ReviewAgent.
 func (a *reviewAgent) Name() string { return a.name }
 
-// Review implements ReviewAgent. It renders the diff into the agent's
-// question, runs the ReAct loop and parses the Final Answer into findings.
-func (a *reviewAgent) Review(ctx context.Context, diffs []diff.FileDiff, agentTools []tools.Tool) ([]AgentFinding, error) {
-	if len(diffs) == 0 {
+// Review implements ReviewAgent. It renders the diff and the static
+// analysis preFindings into the agent's question, runs the ReAct loop and
+// parses the Final Answer into findings.
+func (a *reviewAgent) Review(ctx context.Context, input ReviewInput) ([]AgentFinding, error) {
+	if len(input.Diffs) == 0 {
 		return nil, nil
 	}
 
@@ -89,10 +104,10 @@ func (a *reviewAgent) Review(ctx context.Context, diffs []diff.FileDiff, agentTo
 		return nil, err
 	}
 
-	react := agents.NewOneShotAgent(a.llm, agentTools)
+	react := agents.NewOneShotAgent(a.llm, input.Tools)
 	executor := agents.NewExecutor(react, agents.WithMaxIterations(maxAgentIterations))
 
-	question := buildReviewQuestion(systemPrompt, diffs)
+	question := buildReviewQuestion(systemPrompt, input)
 	result, err := executor.Call(ctx, map[string]any{"input": question})
 	if err != nil {
 		return nil, fmt.Errorf("%s agent execution: %w", a.name, err)
@@ -130,12 +145,38 @@ func loadPrompt(name string) (string, error) {
 }
 
 // buildReviewQuestion assembles the full question fed to the ReAct loop:
-// the externalized system prompt followed by the rendered diff.
-func buildReviewQuestion(systemPrompt string, diffs []diff.FileDiff) string {
+// the externalized system prompt, the rendered diff, and the static
+// analysis preFindings section (FR-22).
+func buildReviewQuestion(systemPrompt string, input ReviewInput) string {
 	var b strings.Builder
 	b.WriteString(systemPrompt)
 	b.WriteString("\n\n=== PULL REQUEST DIFF ===\n")
-	b.WriteString(renderDiff(diffs))
+	b.WriteString(renderDiff(input.Diffs))
+	b.WriteString("\n")
+	b.WriteString(renderPreFindings(input.PreFindings))
+	return b.String()
+}
+
+// renderPreFindings renders the static analysis preFindings as a structured
+// list under the mandatory "## 静态分析发现" section header (FR-22, CLAUDE.md
+// v1.3 prompt template rule).
+func renderPreFindings(preFindings []analysis.PreAnalysisFinding) string {
+	var b strings.Builder
+	b.WriteString("## 静态分析发现\n")
+	if len(preFindings) == 0 {
+		b.WriteString("(none - the static analysis pipeline reported no issues for these files)\n")
+		return b.String()
+	}
+	b.WriteString("Findings below were produced by deterministic tools. Verify each one against the code, then add issues the tools cannot see.\n")
+	for _, pf := range preFindings {
+		fmt.Fprintf(&b, "- ID: %s\n", pf.ID)
+		fmt.Fprintf(&b, "  severity: %s | tool: %s | rule: %s\n", pf.Severity, pf.Tool, pf.RuleID)
+		fmt.Fprintf(&b, "  location: %s:%d\n", pf.FilePath, pf.Line)
+		fmt.Fprintf(&b, "  message: %s\n", pf.Message)
+		if pf.Snippet != "" {
+			fmt.Fprintf(&b, "  snippet: %s\n", pf.Snippet)
+		}
+	}
 	return b.String()
 }
 

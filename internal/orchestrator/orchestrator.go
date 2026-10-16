@@ -18,6 +18,8 @@ import (
 
 	"codereviewagent/internal/ai/agents"
 	"codereviewagent/internal/ai/tools"
+	"codereviewagent/internal/analysis"
+	"codereviewagent/internal/config"
 	"codereviewagent/internal/diff"
 )
 
@@ -48,12 +50,22 @@ type Input struct {
 // concrete agents.Verifier implements it; tests may mock it. Per the
 // project convention this interface is defined in the consumer package.
 type Verifier interface {
-	Verify(ctx context.Context, findings []agents.AgentFinding, diffs []diff.FileDiff) ([]agents.VerifiedFinding, error)
+	Verify(ctx context.Context, findings []agents.AgentFinding, input agents.ReviewInput) ([]agents.VerifiedFinding, error)
 }
 
 // VerifierFactory creates a Verifier bound to the given workspace root
 // (the read_file tool used for hallucination filtering needs the root).
 type VerifierFactory func(root string) Verifier
+
+// AnalysisRunner is the pre-review static analysis pipeline consumed by the
+// orchestrator (FR-17); analysis.Pipeline implements it. Defined in the
+// consumer per project convention.
+type AnalysisRunner interface {
+	Run(ctx context.Context, files []diff.FileDiff) (*analysis.Result, error)
+}
+
+// AnalysisRunnerFactory creates an AnalysisRunner bound to a workspace root.
+type AnalysisRunnerFactory func(root string) AnalysisRunner
 
 // Result carries everything the caller needs after one review run.
 type Result struct {
@@ -66,6 +78,9 @@ type Result struct {
 	SkippedFiles []string
 	// Findings holds the verified, severity-sorted final findings.
 	Findings []agents.VerifiedFinding
+	// PreFindings are the raw static-analysis findings injected into the
+	// agents (v1.3); the caller may persist them for later analysis.
+	PreFindings []analysis.PreAnalysisFinding
 	// AgentErrors records per-agent failures (FR-09 / NFR-02: an agent
 	// failure must not fail the whole review).
 	AgentErrors map[string]string
@@ -82,7 +97,13 @@ type Orchestrator struct {
 	root           string
 	agents         []agents.ReviewAgent
 	verifierFactor VerifierFactory
-	filter         *diff.Filter
+	// analysisFactory creates the pre-review static analysis runner for a
+	// workspace root (FR-17). May be nil to skip pre-analysis.
+	analysisFactory AnalysisRunnerFactory
+	// staticCfg is the static analysis configuration applied by
+	// analysisFactory (set via SetAnalysisConfig).
+	staticCfg config.StaticAnalysisConfig
+	filter    *diff.Filter
 	// agentTimeout bounds each agent's ReAct loop (AC-22: LLM API calls
 	// exceeding 60s mark that agent as failed without affecting others).
 	agentTimeout time.Duration
@@ -93,12 +114,13 @@ type Orchestrator struct {
 
 // New creates an Orchestrator. root is the default review workspace the
 // tools operate on; reviewAgents are executed in parallel; verifierFactory
-// may be nil to skip verification (useful in tests).
+// may be nil to skip verification; analysisFactory may be nil to skip
+// static pre-analysis (both useful in tests).
 func New(logger *zap.Logger, root string, reviewAgents []agents.ReviewAgent, verifierFactory VerifierFactory, filter *diff.Filter) *Orchestrator {
 	if filter == nil {
 		filter = diff.NewFilter(diff.DefaultFilterRules())
 	}
-	return &Orchestrator{
+	o := &Orchestrator{
 		logger:         logger,
 		root:           root,
 		agents:         reviewAgents,
@@ -107,6 +129,16 @@ func New(logger *zap.Logger, root string, reviewAgents []agents.ReviewAgent, ver
 		agentTimeout:   60 * time.Second,
 		lastSeen:       make(map[string]time.Time),
 	}
+	o.analysisFactory = func(wsRoot string) AnalysisRunner {
+		return analysis.NewPipeline(logger, wsRoot, o.staticCfg)
+	}
+	return o
+}
+
+// SetAnalysisConfig enables the static analysis pipeline (FR-17) with the
+// given configuration. Must be called before Run.
+func (o *Orchestrator) SetAnalysisConfig(cfg config.StaticAnalysisConfig) {
+	o.staticCfg = cfg
 }
 
 // severityRank orders findings critical > warning > suggestion > unknown.
@@ -172,13 +204,43 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		res.ReviewedFiles = append(res.ReviewedFiles, p)
 	}
 
-	// Step 4+5: run the review agents in parallel; collect findings and
-	// per-agent failures (FR-09 / NFR-02).
+	// Step 3.5: static analysis pre-run (FR-17): deterministic tools run
+	// before the agents; their findings are injected into agent prompts.
 	root := in.WorkspaceRoot
 	if root == "" {
 		root = o.root
 	}
+	var preFindings []analysis.PreAnalysisFinding
+	if o.analysisFactory != nil {
+		analysisRes, err := o.analysisFactory(root).Run(ctx, reviewable)
+		if err != nil {
+			// All static analysis tools unavailable: agents degrade to pure
+			// LLM review, the pipeline continues (spec 11.5).
+			o.logger.Sugar().Errorw("static analysis pipeline failed, degrading to LLM-only",
+				"error", err)
+		} else {
+			for _, f := range reviewable {
+				preFindings = append(preFindings, analysisRes.ByFile[f.Path]...)
+			}
+			for _, f := range analysisRes.Failures {
+				res.AgentErrors["static-analysis/"+f.Tool] = f.Err
+				o.logger.Sugar().Warnw("static analyzer degraded",
+					"tool", f.Tool, "file", f.File, "error", f.Err)
+			}
+			o.logger.Sugar().Infow("static analysis completed",
+				"findings", len(preFindings), "elapsed", analysisRes.Duration)
+			res.PreFindings = preFindings
+		}
+	}
+
+	// Step 4+5: run the review agents in parallel; collect findings and
+	// per-agent failures (FR-09 / NFR-02).
 	agentTools := o.buildTools(root)
+	agentInput := agents.ReviewInput{
+		Diffs:       reviewable,
+		PreFindings: preFindings,
+		Tools:       agentTools,
+	}
 	var mu sync.Mutex
 	rawFindings := make([]agents.AgentFinding, 0)
 	g := new(errgroup.Group)
@@ -186,7 +248,7 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		agent := a
 		g.Go(func() error {
 			agentStart := time.Now()
-			fnd, err := o.runAgent(ctx, agent, reviewable, agentTools)
+			fnd, err := o.runAgent(ctx, agent, agentInput)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -215,7 +277,7 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		verifier = o.verifierFactor(root)
 	}
 	if verifier != nil && len(rawFindings) > 0 {
-		verified, err := verifier.Verify(ctx, rawFindings, reviewable)
+		verified, err := verifier.Verify(ctx, rawFindings, agentInput)
 		if err != nil {
 			return nil, fmt.Errorf("verify findings: %w", err)
 		}
@@ -235,18 +297,19 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 }
 
 // runAgent executes one agent under its own timeout (AC-22).
-func (o *Orchestrator) runAgent(ctx context.Context, a agents.ReviewAgent, files []diff.FileDiff, agentTools []ltools.Tool) ([]agents.AgentFinding, error) {
+func (o *Orchestrator) runAgent(ctx context.Context, a agents.ReviewAgent, input agents.ReviewInput) ([]agents.AgentFinding, error) {
 	runCtx, cancel := context.WithTimeout(ctx, o.agentTimeout)
 	defer cancel()
-	return a.Review(runCtx, files, agentTools)
+	return a.Review(runCtx, input)
 }
 
 // buildTools creates the context-collection tool set for the review agents,
-// bound to the given review workspace (FR-11).
+// bound to the given review workspace (FR-11). run_static_analysis was
+// removed in v1.3 (FR-23): static analysis runs in the pre-analysis
+// pipeline, not through agent tools.
 func (o *Orchestrator) buildTools(root string) []ltools.Tool {
 	return []ltools.Tool{
 		tools.ReadFileTool{Root: root},
-		tools.RunStaticAnalysisTool{Root: root},
 	}
 }
 

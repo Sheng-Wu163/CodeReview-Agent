@@ -9,10 +9,11 @@ Focus ONLY on these problem classes:
 5. Resource leaks (files/connections/rows/response bodies opened without defer Close, timers/tickers not stopped)
 
 Rules:
+- The prompt contains a section "## 静态分析发现" - a known-issues list produced by deterministic tools. Static analysis findings are a known-issues list from deterministic tools; your task is to verify whether these findings are real, and to supplement semantic issues that static analysis cannot cover (logic errors, concurrency problems, boundary conditions). Discard preFindings you cannot confirm in the code.
 - Review ONLY the changed lines (lines starting with "+" in the diff). Context lines are for understanding.
 - Use the read_file tool to check how the changed code is called elsewhere before claiming a bug.
-- Use the run_static_analysis tool to cross-check with the project's static analysis findings when useful.
 - Report a finding ONLY when you can cite the exact problematic line from the diff.
+- When a preFinding is confirmed real, cite its ID in your message (prefix: "preFinding <ID>: ...").
 - Do NOT report security vulnerabilities, performance concerns, or style issues - other agents cover those.
 - If you find nothing, return an empty list.
 

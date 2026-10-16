@@ -83,7 +83,7 @@ func TestVerifierFiltersHallucinationsAndDedupes(t *testing.T) {
 		},
 	}
 
-	verified, err := v.Verify(context.Background(), findings, verifierDiff())
+	verified, err := v.Verify(context.Background(), findings, ReviewInput{Diffs: verifierDiff()})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestVerifierLineOutOfRangeDropped(t *testing.T) {
 			Message: "other file", CodeSnippet: "", Confidence: 0.9},
 	}
 
-	verified, err := v.Verify(context.Background(), findings, verifierDiff())
+	verified, err := v.Verify(context.Background(), findings, ReviewInput{Diffs: verifierDiff()})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestVerifierEmptySnippetKeptWithoutBonus(t *testing.T) {
 		{Agent: "performance", Severity: SeverityWarning, FilePath: "users.go", LineNumber: 4,
 			Message: "query in hot path", CodeSnippet: "", Confidence: 0.5},
 	}
-	verified, err := v.Verify(context.Background(), findings, verifierDiff())
+	verified, err := v.Verify(context.Background(), findings, ReviewInput{Diffs: verifierDiff()})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestVerifierMissingFileDropped(t *testing.T) {
 		{Agent: "security", Severity: SeverityCritical, FilePath: "ghost.go", LineNumber: 1,
 			Message: "invented file", CodeSnippet: "var x = 1", Confidence: 0.9},
 	}
-	verified, err := v.Verify(context.Background(), findings, verifierDiff())
+	verified, err := v.Verify(context.Background(), findings, ReviewInput{Diffs: verifierDiff()})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestVerifierLLMConfidenceBlend(t *testing.T) {
 		{Agent: "performance", Severity: SeverityWarning, FilePath: "users.go", LineNumber: 4,
 			Message: "query in hot path", CodeSnippet: "", Confidence: 0.5},
 	}
-	verified, err := v.Verify(context.Background(), findings, verifierDiff())
+	verified, err := v.Verify(context.Background(), findings, ReviewInput{Diffs: verifierDiff()})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestVerifierLLMBadScoreErrors(t *testing.T) {
 		{Agent: "lint", Severity: SeveritySuggestion, FilePath: "users.go", LineNumber: 3,
 			Message: "naming", CodeSnippet: "", Confidence: 0.5},
 	}
-	if _, err := v.Verify(context.Background(), findings, verifierDiff()); err == nil {
+	if _, err := v.Verify(context.Background(), findings, ReviewInput{Diffs: verifierDiff()}); err == nil {
 		t.Error("unparseable LLM confidence should produce an error")
 	}
 }

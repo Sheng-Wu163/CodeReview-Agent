@@ -12,6 +12,7 @@ import (
 	ltools "github.com/tmc/langchaingo/tools"
 
 	"codereviewagent/internal/ai/tools"
+	"codereviewagent/internal/analysis"
 	"codereviewagent/internal/diff"
 )
 
@@ -86,7 +87,71 @@ func securityAgentTools(t *testing.T) []ltools.Tool {
 	}
 	return []ltools.Tool{
 		tools.ReadFileTool{Root: root},
-		tools.RunStaticAnalysisTool{Root: root},
+	}
+}
+
+// reviewInput builds a ReviewInput for tests, wiring the standard tool set.
+func reviewInput(t *testing.T, diffs []diff.FileDiff, pre []analysis.PreAnalysisFinding) ReviewInput {
+	return ReviewInput{Diffs: diffs, PreFindings: pre, Tools: securityAgentTools(t)}
+}
+
+// TestSecurityAgentPromptContainsPreFindings is the T20 acceptance test:
+// given a SQL injection diff plus matching preFindings, the agent prompt
+// must contain the "## 静态分析发现" section with the preFinding ID, and the
+// returned finding must cite it.
+func TestSecurityAgentPromptContainsPreFindings(t *testing.T) {
+	preID := "semgrep:sql-injection-concat:internal/db/users.go:11"
+	pre := []analysis.PreAnalysisFinding{
+		{
+			ID: preID, Tool: "semgrep", RuleID: "sql-injection-concat",
+			FilePath: "internal/db/users.go", Line: 11, EndLine: 11,
+			Severity: "critical", Message: "SQL built by string concatenation",
+			Snippet: `db.Query("SELECT * FROM users WHERE id = " + userID)`,
+		},
+	}
+	mock := &mockLLM{
+		response: "Thought: I now know the final answer\nFinal Answer: " +
+			`[{"agent":"security","severity":"critical","file_path":"internal/db/users.go","line_number":11,` +
+			`"message":"preFinding semgrep:sql-injection-concat:internal/db/users.go:11 confirmed: SQL injection via concatenation",` +
+			`"code_snippet":"db.Query(\"SELECT * FROM users WHERE id = \" + userID)",` +
+			`"suggestion":"parameterize","confidence":0.97}]`,
+	}
+	agent := NewSecurityAgent(mock)
+
+	findings, err := agent.Review(context.Background(), reviewInput(t, sqlInjectionDiff(), pre))
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+
+	// Prompt must carry the mandatory section header and the preFinding ID
+	// (FR-22).
+	if !strings.Contains(mock.lastPrompt, "## 静态分析发现") {
+		t.Errorf("prompt missing '## 静态分析发现' section:\n%.500s", mock.lastPrompt)
+	}
+	if !strings.Contains(mock.lastPrompt, preID) {
+		t.Errorf("prompt missing preFinding ID:\n%.500s", mock.lastPrompt)
+	}
+	// Agent output must cite the preFinding ID (T20 acceptance).
+	if len(findings) == 0 {
+		t.Fatal("expected at least 1 finding")
+	}
+	if !strings.Contains(findings[0].Message, preID) {
+		t.Errorf("finding message = %q, want preFinding ID citation", findings[0].Message)
+	}
+}
+
+func TestSecurityAgentPromptWithoutPreFindings(t *testing.T) {
+	mock := &mockLLM{response: "Final Answer: []"}
+	agent := NewSecurityAgent(mock)
+
+	if _, err := agent.Review(context.Background(), reviewInput(t, sqlInjectionDiff(), nil)); err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if !strings.Contains(mock.lastPrompt, "## 静态分析发现") {
+		t.Errorf("prompt must always contain the section header:\n%.500s", mock.lastPrompt)
+	}
+	if !strings.Contains(mock.lastPrompt, "(none") {
+		t.Errorf("empty preFindings should render a placeholder:\n%.500s", mock.lastPrompt)
 	}
 }
 
@@ -100,7 +165,7 @@ func TestSecurityAgentDetectsSQLInjection(t *testing.T) {
 	}
 	agent := NewSecurityAgent(mock)
 
-	findings, err := agent.Review(context.Background(), sqlInjectionDiff(), securityAgentTools(t))
+	findings, err := agent.Review(context.Background(), reviewInput(t, sqlInjectionDiff(), nil))
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
@@ -136,7 +201,7 @@ func TestSecurityAgentPromptContainsSystemPromptAndDiff(t *testing.T) {
 	mock := &mockLLM{response: "Final Answer: []"}
 	agent := NewSecurityAgent(mock)
 
-	if _, err := agent.Review(context.Background(), sqlInjectionDiff(), securityAgentTools(t)); err != nil {
+	if _, err := agent.Review(context.Background(), reviewInput(t, sqlInjectionDiff(), nil)); err != nil {
 		t.Fatalf("Review: %v", err)
 	}
 
@@ -157,7 +222,7 @@ func TestSecurityAgentEmptyDiffSkipsLLM(t *testing.T) {
 	mock := &mockLLM{response: "Final Answer: []"}
 	agent := NewSecurityAgent(mock)
 
-	findings, err := agent.Review(context.Background(), nil, securityAgentTools(t))
+	findings, err := agent.Review(context.Background(), ReviewInput{})
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
@@ -173,7 +238,7 @@ func TestSecurityAgentMalformedOutput(t *testing.T) {
 	mock := &mockLLM{response: "I reviewed the code and it looks mostly fine, no JSON though."}
 	agent := NewSecurityAgent(mock)
 
-	_, err := agent.Review(context.Background(), sqlInjectionDiff(), securityAgentTools(t))
+	_, err := agent.Review(context.Background(), reviewInput(t, sqlInjectionDiff(), nil))
 	if err == nil {
 		t.Error("malformed LLM output should produce an error")
 	}
@@ -188,7 +253,7 @@ func TestSecurityAgentFindingsJSONWithFences(t *testing.T) {
 		"\n```"}
 	agent := NewSecurityAgent(mock)
 
-	findings, err := agent.Review(context.Background(), sqlInjectionDiff(), securityAgentTools(t))
+	findings, err := agent.Review(context.Background(), reviewInput(t, sqlInjectionDiff(), nil))
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}

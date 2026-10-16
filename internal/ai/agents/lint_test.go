@@ -42,7 +42,7 @@ func TestLintAgentDetectsBadNaming(t *testing.T) {
 	}
 	agent := NewLintAgent(mock)
 
-	findings, err := agent.Review(context.Background(), badNamingDiff(), securityAgentTools(t))
+	findings, err := agent.Review(context.Background(), reviewInput(t, badNamingDiff(), nil))
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
@@ -72,14 +72,14 @@ func TestLintAgentPromptInstructsStaticAnalysisFirst(t *testing.T) {
 	mock := &mockLLM{response: "Final Answer: []"}
 	agent := NewLintAgent(mock)
 
-	if _, err := agent.Review(context.Background(), badNamingDiff(), securityAgentTools(t)); err != nil {
+	if _, err := agent.Review(context.Background(), reviewInput(t, badNamingDiff(), nil)); err != nil {
 		t.Fatalf("Review: %v", err)
 	}
 
-	// System prompt must direct the agent to run the static analysis tool
-	// and cover the FR-08 problem classes.
-	if !strings.Contains(mock.lastPrompt, "run_static_analysis") {
-		t.Errorf("prompt missing run_static_analysis instruction:\n%.500s", mock.lastPrompt)
+	// v1.3 (FR-22): the linter findings come from the preFindings section;
+	// the system prompt must instruct verification + supplementation.
+	if !strings.Contains(mock.lastPrompt, "## 静态分析发现") {
+		t.Errorf("prompt missing '## 静态分析发现' section:\n%.500s", mock.lastPrompt)
 	}
 	if !strings.Contains(mock.lastPrompt, "Naming conventions") {
 		t.Errorf("prompt missing naming coverage:\n%.500s", mock.lastPrompt)
@@ -93,7 +93,7 @@ func TestLintAgentNoFindings(t *testing.T) {
 	mock := &mockLLM{response: "Thought: clean\nFinal Answer: []"}
 	agent := NewLintAgent(mock)
 
-	findings, err := agent.Review(context.Background(), badNamingDiff(), securityAgentTools(t))
+	findings, err := agent.Review(context.Background(), reviewInput(t, badNamingDiff(), nil))
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}

@@ -22,3 +22,6 @@ Thumbs.db
 # Local data
 pgdata/
 *.log
+
+# Local runtime config (may contain real secrets)
+configs/config.yaml

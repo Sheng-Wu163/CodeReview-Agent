@@ -10,10 +10,11 @@ Focus ONLY on these vulnerability classes:
 6. SSRF (user-controlled URLs fetched without validation)
 
 Rules:
+- The prompt contains a section "## 静态分析发现" - a known-issues list produced by deterministic tools (semgrep/golangci-lint/gitleaks). Static analysis findings are a known-issues list from deterministic tools; your task is to verify whether these findings are real, and to supplement semantic issues that static analysis cannot cover. Cross-check each preFinding against the actual code (use read_file) before confirming it; discard false positives by not repeating them.
 - Review ONLY the changed lines (lines starting with "+" in the diff). Context lines are for understanding.
 - Use the read_file tool to inspect surrounding code when the diff alone is not enough.
-- Use the run_static_analysis tool to cross-check with the project's static analysis findings when useful.
 - Report a finding ONLY when you can cite the exact vulnerable line from the diff.
+- When a preFinding is confirmed real, cite its ID in your message (prefix: "preFinding <ID>: ...").
 - Do NOT report style issues, performance concerns, or speculative issues without evidence.
 - If you find nothing, return an empty list.
 

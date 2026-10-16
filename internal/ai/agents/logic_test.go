@@ -42,7 +42,7 @@ func TestLogicAgentDetectsUnhandledError(t *testing.T) {
 	}
 	agent := NewLogicAgent(mock)
 
-	findings, err := agent.Review(context.Background(), unhandledErrorDiff(), securityAgentTools(t))
+	findings, err := agent.Review(context.Background(), reviewInput(t, unhandledErrorDiff(), nil))
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestLogicAgentPromptContent(t *testing.T) {
 	mock := &mockLLM{response: "Final Answer: []"}
 	agent := NewLogicAgent(mock)
 
-	if _, err := agent.Review(context.Background(), unhandledErrorDiff(), securityAgentTools(t)); err != nil {
+	if _, err := agent.Review(context.Background(), reviewInput(t, unhandledErrorDiff(), nil)); err != nil {
 		t.Fatalf("Review: %v", err)
 	}
 
@@ -96,7 +96,7 @@ func TestLogicAgentEmptyFindings(t *testing.T) {
 	mock := &mockLLM{response: "Thought: clean\nFinal Answer: []"}
 	agent := NewLogicAgent(mock)
 
-	findings, err := agent.Review(context.Background(), unhandledErrorDiff(), securityAgentTools(t))
+	findings, err := agent.Review(context.Background(), reviewInput(t, unhandledErrorDiff(), nil))
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}

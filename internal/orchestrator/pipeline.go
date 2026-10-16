@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"codereviewagent/internal/ai/agents"
+	"codereviewagent/internal/analysis"
 	"codereviewagent/internal/github"
 	"codereviewagent/internal/repository"
 	"codereviewagent/internal/vcs"
@@ -27,6 +28,9 @@ type GitHubAPI interface {
 type ReviewStore interface {
 	CreateReview(ctx context.Context, rev *repository.Review) (int64, error)
 	UpdateReviewStatus(ctx context.Context, id int64, status, summary *string) error
+	// UpdateReviewPreFindings persists the serialized static-analysis
+	// preFindings JSON (v1.3 FR-24 / AC-43).
+	UpdateReviewPreFindings(ctx context.Context, id int64, preFindings string) error
 	CreateFinding(ctx context.Context, f *repository.Finding) (int64, error)
 }
 
@@ -112,6 +116,16 @@ func (p *Pipeline) Process(ctx context.Context, ev EventInput) {
 		log.Errorw("review pipeline failed", "error", err)
 		p.failReview(ctx, reviewID, owner, repoName, ev, err.Error())
 		return
+	}
+
+	// Persist the static-analysis preFindings for later analysis (AC-43).
+	if len(res.PreFindings) > 0 {
+		preJSON, err := analysis.MarshalPreFindings(res.PreFindings)
+		if err != nil {
+			log.Errorw("marshal preFindings", "error", err)
+		} else if err := p.store.UpdateReviewPreFindings(ctx, reviewID, preJSON); err != nil {
+			log.Errorw("persist preFindings", "error", err)
+		}
 	}
 
 	// Persist findings (FR-14).

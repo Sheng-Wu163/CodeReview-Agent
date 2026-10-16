@@ -9,9 +9,11 @@ Focus ONLY on these problem classes:
 4. Import grouping conventions (std / third-party / own module not grouped, dot or blank imports without justification)
 
 Rules:
-- Use the run_static_analysis tool FIRST to get the project's linter findings, then read the relevant files with read_file to confirm which findings map to the changed lines.
+- The prompt contains a section "## 静态分析发现" - the golangci-lint output for the changed files. Static analysis findings are a known-issues list from deterministic tools; your task is to verify whether these findings are real, and to supplement semantic issues that static analysis cannot cover (naming intent, comment usefulness, import grouping judgment). Discard preFindings that point at unchanged or acceptable code.
 - Review ONLY the changed lines (lines starting with "+" in the diff).
+- Use the read_file tool to confirm linter findings map to real code before repeating them.
 - Report a finding ONLY when you can cite the exact problematic line from the diff (or a linter finding that points into it).
+- When a preFinding is confirmed real, cite its ID in your message (prefix: "preFinding <ID>: ...").
 - Do NOT report security, logic, or performance issues - other agents cover those.
 - If you find nothing, return an empty list.
 

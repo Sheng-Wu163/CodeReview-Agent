@@ -259,3 +259,124 @@ IEEE 2026 年的一项研究提出了四 Agent 代码审查框架（安全专家
 2. ~~是否需要 RAG~~ → 第一版不做 RAG，用 ReAct Loop 替代（Agent 自主调用文件读取工具）
 3. ~~前端框架~~ → 使用 Go 模板 + HTMX（避免引入 Node.js 构建链），或 Next.js 静态导出后嵌入
 4. 审查结果的反馈闭环（开发者接受/驳回）是否在第一版实现？→ 暂定第一版只记录，不用于优化
+
+## 11. v1.3 静态分析管道
+
+### 11.1 Why
+
+当前静态分析由 LLM 通过 `run_static_analysis` 工具在 ReAct 循环中按需调用，存在三个根本问题：
+
+1. **结果不稳定**：同一个 PR，两次审查可能调用不同的工具组合（LLM 的决策有随机性），导致审查结果不可复现
+2. **成本浪费**：让 LLM 决定何时调用静态分析，每一次决策都消耗 token；而静态分析本身的运行成本几乎为零
+3. **覆盖不全**：LLM 可能忘记调用某些工具（尤其是 semgrep，因为它的输出很长，LLM 倾向于避免）
+
+**目标**：把静态分析从"LLM 按需调用"改为"审查前确定性运行"，结果结构化为 `PreAnalysisFinding` 列表注入各审查 Agent 的 Prompt，让 Agent 聚焦于"验证已知问题 + 补充语义问题"。
+
+### 11.2 Requirements
+
+**FR-16: PreAnalysisFinding 结构**
+系统必须定义一个跨工具统一的 `PreAnalysisFinding` 结构体，包含字段：ID（稳定指纹）、Tool、RuleID、FilePath、Line、EndLine、Severity、Message、Snippet。ID 的生成规则为 `<tool>:<ruleID>:<filePath>:<line>`，保证跨次扫描的去重稳定性。
+
+**FR-17: 静态分析管道**
+系统必须在 Diff 解析完成后、Agent 执行前，对变更涉及的每个文件运行三个静态分析工具：
+- Semgrep（安全规则 + 项目自定义规则）
+- golangci-lint（Go 代码质量）
+- gitleaks（硬编码密钥检测）
+
+**FR-18: Secret Scanner 集成**
+系统必须集成 gitleaks 作为库（而非外部 CLI），扫描变更文件中是否包含硬编码的密钥、Token、密码。gitleaks 的默认规则集必须启用，且支持通过配置文件扩展自定义规则。
+
+**FR-19: 并行执行与超时控制**
+系统必须对每个文件并行运行三个工具（goroutine），并对每个工具对每个文件的执行设置 30 秒超时。整体管道的并发度通过配置控制（默认 4 个 worker）。
+
+**FR-20: 降级策略**
+系统必须在任一工具不可用时降级：
+- Semgrep 不可用 → 记录 warning，安全 Agent 走纯 LLM 审查
+- golangci-lint 不可用 → 记录 warning，规范 Agent 走纯 LLM 审查
+- gitleaks 不可用 → 记录 critical error，因为 Secret Scanner 是内嵌的，不可用意味着构建错误
+
+**FR-21: Agent 接口改造**
+`ReviewAgent.Review` 方法必须新增 `PreFindings []PreAnalysisFinding` 参数。所有四个审查 Agent（安全、逻辑、性能、规范）和验证 Agent 必须适配新接口。
+
+**FR-22: Prompt 注入**
+Agent 的 User message 必须包含"静态分析发现"段落，格式为结构化的 preFindings 列表。System prompt 明确指示 Agent："静态分析发现是确定性工具的已知问题列表，你的任务是验证这些发现的真实性，并补充静态分析无法覆盖的语义问题（逻辑错误、并发问题、边界条件）。"
+
+**FR-23: 移除 run_static_analysis 工具**
+`run_static_analysis` 工具必须从工具注册表中移除。Agent 不再自己调用静态分析工具，所有静态分析结果由管道预先提供。
+
+**FR-24: 配置化**
+静态分析管道的所有参数必须通过配置文件控制（`configs/config.yaml`），包括：是否启用、每个文件的超时、并发度、每个工具的启用状态、Semgrep 自定义规则目录、golangci-lint 配置文件路径。
+
+### 11.3 Interface Freeze Declaration
+
+以下接口在本迭代完成后冻结，后续模块不得修改其字段：
+
+```go
+// PreAnalysisFinding 是跨工具统一的静态分析发现结构
+type PreAnalysisFinding struct {
+    ID       string // 稳定指纹: <tool>:<ruleID>:<filePath>:<line>
+    Tool     string // "semgrep" | "golangci-lint" | "gitleaks"
+    RuleID   string // 工具内部的规则 ID
+    FilePath string
+    Line     int
+    EndLine  int
+    Severity string // "critical" | "warning" | "suggestion"
+    Message  string
+    Snippet  string // 相关代码片段（最多 5 行）
+}
+
+// ReviewInput 是 Agent 的输入结构
+type ReviewInput struct {
+    Diffs        []diff.FileDiff
+    PreFindings  []PreAnalysisFinding
+    Tools        []tools.Tool
+}
+```
+
+如果后续模块需要扩展这些结构，必须走"变更提案"机制（见 `specs/changes/` 目录规范）。
+
+### 11.4 Impact Analysis
+
+**受影响模块**：
+- `internal/ai/agents/*`：所有 Agent 的 `Review` 方法签名变化
+- `internal/ai/tools/static_analysis.go`：删除
+- `internal/orchestrator/orchestrator.go`：新增静态分析管道调用
+- `internal/ai/prompts/*.txt`：所有 Agent 的 User message 模板需要更新
+
+**新增模块**：
+- `internal/analysis/`：静态分析管道
+  - `pipeline.go`：管道编排
+  - `types.go`：PreAnalysisFinding 定义
+  - `semgrep.go`：Semgrep 集成
+  - `golangci.go`：golangci-lint 集成
+  - `gitleaks.go`：gitleaks 集成
+  - `fingerprint.go`：稳定指纹生成
+
+**配置文件变化**：
+`configs/config.yaml` 新增 `static_analysis` 段落。
+
+### 11.5 Edge Cases
+
+| 场景 | 期望行为 |
+|------|---------|
+| 变更文件为 `.go` 但语法错误，Semgrep 解析失败 | 记录 warning，跳过该文件的 Semgrep 分析，其他工具继续 |
+| 变更文件超过 5000 行 | 跳过静态分析，记录 warning "file too large" |
+| 所有静态分析工具均不可用 | 记录 error，Agent 走纯 LLM 审查，不阻塞流程 |
+| 同一 PR 内同一文件被多次修改 | 只分析一次（用最终版本） |
+| Semgrep 输出格式变化（版本升级） | 通过单元测试锁定解析器，升级时测试会失败并提示 |
+
+## CHANGELOG
+
+### v1.3 (2026-10-16) — tag: v1.3-complete
+- ADDED: PreAnalysisFinding 结构与稳定性指纹 `<tool>:<ruleID>:<filePath>:<line>`（接口冻结，FR-16）
+- ADDED: 静态分析预管道 `internal/analysis/`（Semgrep + golangci-lint + gitleaks，FR-17/FR-18）
+- ADDED: 并行执行与每文件超时控制（worker pool + goroutine/select 超时，FR-19）
+- ADDED: 降级策略（单工具失败仅降级该工具；全部失败则 Agent 纯 LLM 审查，FR-20）
+- ADDED: `static_analysis` 配置块（开关/超时/worker/规则目录，FR-24）
+- ADDED: 端到端集成测试 `internal/integration/e2e_test.go`（混合问题 PR 全链路验证）
+- MODIFIED: `ReviewAgent.Review` 方法签名（`ReviewInput` 携带 PreFindings，FR-21）
+- MODIFIED: Agent User message 模板（新增 `## 静态分析发现` 段落，FR-22）
+- REMOVED: run_static_analysis 工具（FR-23）
+
+### v1.2 (2026-10-12) — tag: v1.2-complete
+- 基础版本（四 Agent + 验证 Agent + ReAct + GitHub 回写 + 仪表盘）

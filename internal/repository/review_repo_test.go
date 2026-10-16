@@ -297,6 +297,35 @@ func TestListFindings(t *testing.T) {
 	}
 }
 
+// TestUpdateReviewPreFindings covers the v1.3 AC-43 persistence: the
+// serialized preFindings JSON must round-trip through the reviews table.
+func TestUpdateReviewPreFindings(t *testing.T) {
+	repo, cleanup := newTestRepo(t)
+	defer cleanup()
+	ctx := context.Background()
+	truncateReviews(t, repo)
+
+	id, err := repo.CreateReview(ctx, &Review{
+		RepoFullName: "p/q", PRNumber: 3, HeadSHA: "sha-3", Status: "pending",
+	})
+	if err != nil {
+		t.Fatalf("CreateReview: %v", err)
+	}
+
+	const preJSON = `[{"ID":"gitleaks:openai-style-key:secrets.go:3","Tool":"gitleaks","RuleID":"openai-style-key","FilePath":"secrets.go","Line":3,"EndLine":3,"Severity":"critical","Message":"Hardcoded secret","Snippet":"const apiKey = \"sk-xxxxx\""}]`
+	if err := repo.UpdateReviewPreFindings(ctx, id, preJSON); err != nil {
+		t.Fatalf("UpdateReviewPreFindings: %v", err)
+	}
+
+	got, err := repo.GetReview(ctx, id)
+	if err != nil {
+		t.Fatalf("GetReview: %v", err)
+	}
+	if got.PreFindings != preJSON {
+		t.Errorf("PreFindings = %q, want %q", got.PreFindings, preJSON)
+	}
+}
+
 func TestUpdateReviewStatus(t *testing.T) {
 	repo, closeDB := newTestRepo(t)
 	defer closeDB()
