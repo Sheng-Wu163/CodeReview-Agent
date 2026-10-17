@@ -129,3 +129,48 @@
 - [x] `spec.md` 的 CHANGELOG 已更新（v1.3 行改为实际日期）
 - [x] `specs/code-review-agent/spec.md` 已更新至 v1.3 状态
 - [ ] git tag `v1.3-complete` 已打（迭代完成）← 由用户人工执行
+
+## v1.1 局部上下文注入验收
+
+### 变更检测验收
+
+- [x] AC-50: Given 变更文件中修改了 `func CalculateTotal(items []Item) float64` 的参数类型, When 变更检测器运行, Then 返回 1 条 `signature_changed` 记录
+  - ✅ `internal/context/detector_test.go` TestDetectStructuralChanges/"exported function param change"
+- [x] AC-51: Given 变更文件中仅修改了私有函数内部逻辑, When 变更检测器运行, Then 返回空 `StructuralChange` 列表
+  - ✅ 同测试 "private function logic change"
+
+### 调用检索验收
+
+- [x] AC-52: Given 变更了 `CalculateTotal` 函数，且代码库中有 3 处调用, When 局部检索器运行, Then 返回 3 个 `CallSite`，且包含行号和代码片段
+  - ✅ `internal/context/callers_test.go` TestCallerRetrieverFindsCallSites + `internal/integration/e2e_test.go` TestE2EContextInjectionOnSignatureChange
+- [x] AC-53: Given 某个导出函数被调用了 15 次, When 局部检索器运行, Then 截断至 10 个，并记录 warning
+  - ✅ TestCallerRetrieverTruncatesAt10（warning 由 retriever 记录）
+- [x] AC-54: Given 代码库存在语法错误导致 `go/packages` 失败, When 局部检索器运行, Then 返回空列表，日志记录 warning，不阻塞流程
+  - ✅ TestCallerRetrieverDegradesOnBrokenPackage
+
+### 上下文组装与注入验收
+
+- [x] AC-55: Given 检索到了 Callers 和 Callees, When ContextBuilder 运行, Then 生成正确的 `ContextBundle` 结构
+  - ✅ `internal/context/builder_impl.go`（单次加载串联检测/调用者/被调用者）+ orchestrator TestOrchestratorInjectsLocalContext
+- [x] AC-56: Given 一个包含结构性变更的测试 PR, When 完整审查流程运行, Then Agent 的输入 Prompt 中包含 `## 补充上下文` 段落
+  - ✅ `agents` TestBuildReviewQuestionRendersContextSection + e2e TestE2EContextInjectionOnSignatureChange
+- [x] AC-57: Given 包含补充上下文的 Prompt, When 检查 System Prompt, Then 必须包含防幻觉声明：“补充上下文来自静态分析，可能不完整...”
+  - ✅ TestReviewSystemPromptsEndWithDeclaration（4 个审查 Agent 的 .txt 末句原文）
+- [x] AC-58: Given 一个仅修改注释的 PR, When 完整审查流程运行, Then Prompt 中不包含 `## 补充上下文` 段落
+  - ✅ TestBuildReviewQuestionOmitsEmptyContext（空 bundle 完全不渲染该段落）
+
+### 代码质量验收
+
+- [x] AC-59: 执行 `golangci-lint run ./...` 无 error 级别问题
+  - ✅ `internal/context/` 无 error 级别问题（沿用 v1.3 结论：仅存历史 warning 级风格问题）
+- [ ] AC-60: 执行 `go test ./... -race` 全部通过
+  - ⚠️ 本机无 gcc（`-race` 依赖 cgo），无法执行；已执行 `go test ./...` 全量通过。请在具备 gcc 的环境中补充执行
+- [x] AC-61: `internal/context/` 下所有导出函数和类型均有文档注释
+  - ✅ 全部导出符号（类型/常量/函数/方法）带 doc comment
+
+## 迭代交付清单
+
+- [x] git tag `v1.1-start` 已打
+- [x] 所有 AC-50 ~ AC-61 通过（AC-60 受环境限制，见上文说明）
+- [x] `spec.md` 的 CHANGELOG 已更新
+- [ ] git tag `v1.1-complete` 已打 ← 由用户人工执行

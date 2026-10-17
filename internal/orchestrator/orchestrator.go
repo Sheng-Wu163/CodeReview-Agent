@@ -20,6 +20,7 @@ import (
 	"codereviewagent/internal/ai/tools"
 	"codereviewagent/internal/analysis"
 	"codereviewagent/internal/config"
+	ctxcontext "codereviewagent/internal/context"
 	"codereviewagent/internal/diff"
 )
 
@@ -67,6 +68,16 @@ type AnalysisRunner interface {
 // AnalysisRunnerFactory creates an AnalysisRunner bound to a workspace root.
 type AnalysisRunnerFactory func(root string) AnalysisRunner
 
+// ContextBuilder builds the local context bundle injected into the agents
+// (v1.1 FR-25..FR-29); context.Builder implements it. Defined in the
+// consumer per project convention.
+type ContextBuilder interface {
+	Build(ctx context.Context, diffs []diff.FileDiff) (ctxcontext.ContextBundle, error)
+}
+
+// ContextBuilderFactory creates a ContextBuilder bound to a workspace root.
+type ContextBuilderFactory func(root string) ContextBuilder
+
 // Result carries everything the caller needs after one review run.
 type Result struct {
 	// Input echoes the review request.
@@ -100,6 +111,9 @@ type Orchestrator struct {
 	// analysisFactory creates the pre-review static analysis runner for a
 	// workspace root (FR-17). May be nil to skip pre-analysis.
 	analysisFactory AnalysisRunnerFactory
+	// contextFactory creates the local-context builder for a workspace root
+	// (v1.1 FR-25). May be nil to skip context injection.
+	contextFactory ContextBuilderFactory
 	// staticCfg is the static analysis configuration applied by
 	// analysisFactory (set via SetAnalysisConfig).
 	staticCfg config.StaticAnalysisConfig
@@ -132,7 +146,16 @@ func New(logger *zap.Logger, root string, reviewAgents []agents.ReviewAgent, ver
 	o.analysisFactory = func(wsRoot string) AnalysisRunner {
 		return analysis.NewPipeline(logger, wsRoot, o.staticCfg)
 	}
+	o.contextFactory = func(wsRoot string) ContextBuilder {
+		return ctxcontext.NewBuilder(wsRoot, logger)
+	}
 	return o
+}
+
+// SetContextBuilderFactory overrides the local-context builder factory
+// (v1.1); tests inject a mock, production uses the default Builder.
+func (o *Orchestrator) SetContextBuilderFactory(f ContextBuilderFactory) {
+	o.contextFactory = f
 }
 
 // SetAnalysisConfig enables the static analysis pipeline (FR-17) with the
@@ -236,9 +259,30 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 	// Step 4+5: run the review agents in parallel; collect findings and
 	// per-agent failures (FR-09 / NFR-02).
 	agentTools := o.buildTools(root)
+
+	// Step 3.6: local context injection (v1.1 FR-25..FR-29). The builder
+	// degrades to an empty bundle on failure, so this never blocks review.
+	var ctxBundle ctxcontext.ContextBundle
+	if o.contextFactory != nil {
+		bundle, err := o.contextFactory(root).Build(ctx, reviewable)
+		if err != nil {
+			o.logger.Sugar().Warnw("local context build failed, continuing without context",
+				"error", err)
+		} else {
+			ctxBundle = bundle
+			if !bundle.IsEmpty() {
+				o.logger.Sugar().Infow("local context built",
+					"changes", len(bundle.Changes),
+					"callers", len(bundle.Callers),
+					"callees", len(bundle.Callees))
+			}
+		}
+	}
+
 	agentInput := agents.ReviewInput{
 		Diffs:       reviewable,
 		PreFindings: preFindings,
+		Context:     ctxBundle,
 		Tools:       agentTools,
 	}
 	var mu sync.Mutex

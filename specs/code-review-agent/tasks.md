@@ -293,3 +293,94 @@ T10 + T11 + T12 → T13 → T14
 - **依赖**：T20
 - **预估**：3h
 - **状态**：✅ 已完成
+
+## 阶段六：v1.1 局部上下文注入（T22-T28）
+
+### T22: ContextBundle 类型定义与 ContextBuilder 接口
+- **描述**：在 `internal/context/` 下定义 `StructuralChange`、`CallSite`、`FunctionDef`、`ContextBundle` 结构体，以及 `ContextBuilder` 接口。
+- **文件路径**：
+  - `internal/context/types.go`
+  - `internal/context/builder.go`
+- **完成标准**：`go build ./...` 通过；结构体字段严格匹配接口冻结声明。
+- **依赖**：T1
+- **预估**：1h
+- **状态**：✅ 已完成
+
+### T23: 结构性变更检测器
+- **描述**：实现一个 AST 解析器，接收 `[]diff.FileDiff`，对比新旧代码，提取出导出函数的签名变更和 interface 方法变更。返回 `[]StructuralChange`。
+- **文件路径**：
+  - `internal/context/detector.go`
+  - `internal/context/detector_test.go`
+- **完成标准**：
+  - 对包含导出函数参数修改的测试 diff，返回 1 条 `signature_changed`
+  - 对包含私有函数逻辑修改的测试 diff，返回 0 条
+  - 对包含 interface 方法增减的测试 diff，返回 1 条 `interface_changed`
+- **依赖**：T22, T4
+- **预估**：4h
+- **状态**：✅ 已完成
+
+### T24: 局部调用者检索器
+- **描述**：使用 `golang.org/x/tools/go/packages` 加载代码包，遍历 AST，找出对目标函数的调用点（最多 10 个），并提取包含该调用的上下文代码片段（Snippet）。如果加载超时（10s）或失败，返回空。
+- **文件路径**：
+  - `internal/context/callers.go`
+  - `internal/context/callers_test.go`
+- **完成标准**：
+  - 对提供测试用例代码库中的函数，准确检索出调用点及行号
+  - 超过 10 个调用点时截断并返回 warning
+  - `go/packages` 加载失败时降级返回空列表
+- **依赖**：T22
+- **预估**：5h
+- **状态**：✅ 已完成
+
+### T25: 局部被调用者摘要器
+- **描述**：解析变更函数的 AST 体，提取其调用的同级或同包内函数，获取这些函数的签名和首行注释。
+- **文件路径**：
+  - `internal/context/callees.go`
+  - `internal/context/callees_test.go`
+- **完成标准**：
+  - 对包含内部函数调用的测试用例，正确提取函数签名
+- **依赖**：T23
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T26: ContextBuilder 实现与 Orchestrator 集成
+- **描述**：实现 `ContextBuilder` 接口，串联 T23-T25。在 `orchestrator.go` 中，在获取 PreFindings 后，调用 `ContextBuilder.Build`，将结果放入 `ReviewInput`。
+- **文件路径**：
+  - `internal/context/builder_impl.go`
+  - `internal/orchestrator/orchestrator.go`
+  - `internal/orchestrator/orchestrator_test.go`
+- **完成标准**：
+  - 编译通过
+  - Orchestrator 测试中，mock 一个 ContextBundle，验证其被正确传入 Agent
+- **依赖**：T23, T24, T25, T19
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T27: Prompt 注入与防幻觉声明
+- **描述**：
+  1. 修改 `ReviewInput`，增加 `Context ContextBundle`。
+  2. 修改所有审查 Agent 的 User message 模板（`internal/ai/prompts/*.txt`），如果 Context 非空，则添加 `## 补充上下文` 段落。
+  3. 在 System prompt 末尾追加防幻觉声明：“补充上下文来自静态分析，可能不完整。请结合代码自身逻辑判断。”
+- **文件路径**：
+  - `internal/ai/agents/*.go`
+  - `internal/ai/prompts/*.txt`
+- **完成标准**：
+  - `go build ./...` 通过
+  - 渲染出的 Prompt 包含正确的上下文和防幻觉声明
+- **依赖**：T26
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T28: v1.1 集成测试与交付
+- **描述**：
+  1. 编写端到端测试：模拟修改了一个导出函数签名，验证 Callers 被正确注入给 Agent。
+  2. 更新 `spec.md` 的 CHANGELOG 并标记完成。
+  3. 更新 `checklist.md`，标记 AC 通过。
+  4. 提示用户打 tag。
+- **文件路径**：
+  - `internal/integration/e2e_test.go`
+  - `specs/code-review-agent/*`
+- **完成标准**：测试通过，输出提示：“v1.1 交付完成，请执行 git tag v1.1-complete”
+- **依赖**：T27
+- **预估**：2h
+- **状态**：✅ 已完成

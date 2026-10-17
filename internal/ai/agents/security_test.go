@@ -11,8 +11,10 @@ import (
 	"github.com/tmc/langchaingo/llms"
 	ltools "github.com/tmc/langchaingo/tools"
 
+	"codereviewagent/internal/ai/prompts"
 	"codereviewagent/internal/ai/tools"
 	"codereviewagent/internal/analysis"
+	ctxcontext "codereviewagent/internal/context"
 	"codereviewagent/internal/diff"
 )
 
@@ -297,4 +299,83 @@ func severitiesOf(fs []AgentFinding) []string {
 		out = append(out, fmt.Sprintf("%s@%s:%d", f.Severity, f.FilePath, f.LineNumber))
 	}
 	return out
+}
+
+// antiHallucinationDeclaration is the verbatim v1.1 system-prompt statement
+// (FR-28, T27).
+const antiHallucinationDeclaration = "补充上下文来自静态分析，可能不完整。请结合代码自身逻辑进行判断，不要将其作为唯一依据。"
+
+// TestBuildReviewQuestionRendersContextSection verifies the three-section
+// user message and the injected context (T27, AC-55/AC-56/AC-57).
+func TestBuildReviewQuestionRendersContextSection(t *testing.T) {
+	mock := &mockLLM{response: "Final Answer: []"}
+	agent := NewSecurityAgent(mock)
+
+	input := ReviewInput{
+		Diffs: sqlInjectionDiff(),
+		Tools: securityAgentTools(t),
+		Context: ctxcontext.ContextBundle{
+			Changes: []ctxcontext.StructuralChange{{
+				FilePath: "internal/db/users.go", FunctionName: "GetUser", ChangeType: ctxcontext.SignatureChanged,
+			}},
+			Callers: []ctxcontext.CallSite{{
+				FilePath: "main.go", Line: 7, Snippet: "GetUser(db, id)", CallerFunc: "main",
+			}},
+			Callees: []ctxcontext.FunctionDef{{
+				Package: "db", Name: "helper", Signature: "(int) (int)", Doc: "helper does x.",
+			}},
+		},
+	}
+	if _, err := agent.Review(context.Background(), input); err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+
+	for _, want := range []string{
+		"## 代码变更",
+		"## 静态分析发现",
+		"## 补充上下文",
+		"GetUser(db, id)",
+		"db.helper(int) (int)",
+		"helper does x.",
+		antiHallucinationDeclaration,
+	} {
+		if !strings.Contains(mock.lastPrompt, want) {
+			t.Errorf("prompt missing %q:\n%.800s", want, mock.lastPrompt)
+		}
+	}
+}
+
+// TestBuildReviewQuestionOmitsEmptyContext verifies an empty bundle never
+// renders the "## 补充上下文" section (AC-58, CLAUDE.v1.1.md).
+func TestBuildReviewQuestionOmitsEmptyContext(t *testing.T) {
+	mock := &mockLLM{response: "Final Answer: []"}
+	agent := NewSecurityAgent(mock)
+
+	if _, err := agent.Review(context.Background(), reviewInput(t, sqlInjectionDiff(), nil)); err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if strings.Contains(mock.lastPrompt, "## 补充上下文") {
+		t.Errorf("empty context must not render the section:\n%.500s", mock.lastPrompt)
+	}
+	for _, want := range []string{"## 代码变更", "## 静态分析发现"} {
+		if !strings.Contains(mock.lastPrompt, want) {
+			t.Errorf("prompt missing %q:\n%.500s", want, mock.lastPrompt)
+		}
+	}
+}
+
+// TestReviewSystemPromptsEndWithDeclaration verifies every review system
+// prompt ends with the verbatim anti-hallucination declaration (AC-57).
+func TestReviewSystemPromptsEndWithDeclaration(t *testing.T) {
+	for _, name := range []string{"security.txt", "logic.txt", "performance.txt", "lint.txt"} {
+		t.Run(name, func(t *testing.T) {
+			content, err := prompts.Get(name)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", name, err)
+			}
+			if !strings.HasSuffix(strings.TrimSpace(content), antiHallucinationDeclaration) {
+				t.Errorf("%s must end with the anti-hallucination declaration", name)
+			}
+		})
+	}
 }

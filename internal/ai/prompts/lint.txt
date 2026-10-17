@@ -26,3 +26,5 @@ Your Final Answer MUST be exactly a JSON array (no prose, no markdown fences) wh
 {"agent":"lint","severity":"suggestion","file_path":"<path>","line_number":<int>,"message":"<what and why>","code_snippet":"<exact code from the diff>","suggestion":"<how to fix>","confidence":<0.0-1.0>}
 
 If there are no findings, return [].
+
+补充上下文来自静态分析，可能不完整。请结合代码自身逻辑进行判断，不要将其作为唯一依据。

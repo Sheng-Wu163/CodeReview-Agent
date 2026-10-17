@@ -14,6 +14,7 @@ import (
 
 	"codereviewagent/internal/ai/prompts"
 	"codereviewagent/internal/analysis"
+	ctxcontext "codereviewagent/internal/context"
 	"codereviewagent/internal/diff"
 )
 
@@ -60,6 +61,9 @@ type ReviewInput struct {
 	// by the pre-analysis pipeline (FR-17), injected into the prompt
 	// (FR-22).
 	PreFindings []analysis.PreAnalysisFinding
+	// Context is the local context bundle (structural changes + callers +
+	// callees) injected into the prompt (v1.1 FR-25..FR-28).
+	Context ctxcontext.ContextBundle
 	// Tools are the context-collection tools available to the agent
 	// (FR-11).
 	Tools []tools.Tool
@@ -145,15 +149,52 @@ func loadPrompt(name string) (string, error) {
 }
 
 // buildReviewQuestion assembles the full question fed to the ReAct loop:
-// the externalized system prompt, the rendered diff, and the static
-// analysis preFindings section (FR-22).
+// the externalized system prompt followed by the three mandatory sections
+// (CLAUDE.v1.1.md): "## 代码变更", "## 静态分析发现" and, only when present,
+// "## 补充上下文".
 func buildReviewQuestion(systemPrompt string, input ReviewInput) string {
 	var b strings.Builder
 	b.WriteString(systemPrompt)
-	b.WriteString("\n\n=== PULL REQUEST DIFF ===\n")
+	b.WriteString("\n\n## 代码变更\n")
 	b.WriteString(renderDiff(input.Diffs))
 	b.WriteString("\n")
 	b.WriteString(renderPreFindings(input.PreFindings))
+	if !input.Context.IsEmpty() {
+		b.WriteString("\n")
+		b.WriteString(renderContext(input.Context))
+	}
+	return b.String()
+}
+
+// renderContext renders the local context bundle under the "## 补充上下文"
+// section. It is only called for a non-empty bundle: an empty bundle must
+// not render the section at all (CLAUDE.v1.1.md token-saving rule).
+func renderContext(bundle ctxcontext.ContextBundle) string {
+	var b strings.Builder
+	b.WriteString("## 补充上下文\n")
+	b.WriteString("Retrieved by static analysis for reference only (may be incomplete).\n")
+
+	if len(bundle.Changes) > 0 {
+		b.WriteString("### 结构性变更\n")
+		for _, c := range bundle.Changes {
+			fmt.Fprintf(&b, "- %s: %s (%s)\n", c.ChangeType, c.FunctionName, c.FilePath)
+		}
+	}
+	if len(bundle.Callers) > 0 {
+		b.WriteString("### 调用点\n")
+		for _, c := range bundle.Callers {
+			fmt.Fprintf(&b, "- %s at %s:%d: %s\n", c.CallerFunc, c.FilePath, c.Line, c.Snippet)
+		}
+	}
+	if len(bundle.Callees) > 0 {
+		b.WriteString("### 被调用函数\n")
+		for _, c := range bundle.Callees {
+			fmt.Fprintf(&b, "- %s.%s%s\n", c.Package, c.Name, c.Signature)
+			if c.Doc != "" {
+				fmt.Fprintf(&b, "  doc: %s\n", c.Doc)
+			}
+		}
+	}
 	return b.String()
 }
 

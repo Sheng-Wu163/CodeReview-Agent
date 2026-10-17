@@ -238,6 +238,7 @@ IEEE 2026 年的一项研究提出了四 Agent 代码审查框架（安全专家
 | github.com/go-chi/chi/v5 | v5+ | HTTP 路由 |
 | github.com/spf13/viper | latest | 配置管理 |
 | go.uber.org/zap | latest | 结构化日志 |
+| golang.org/x/tools | v0.52+ | go/packages（v1.1 局部上下文检索） |
 
 ### 9.2 外部工具
 
@@ -380,3 +381,101 @@ type ReviewInput struct {
 
 ### v1.2 (2026-10-12) — tag: v1.2-complete
 - 基础版本（四 Agent + 验证 Agent + ReAct + GitHub 回写 + 仪表盘）
+
+## 12. v1.1 局部上下文注入
+
+### 12.1 Why
+
+当前版本（v1.3）的审查 Agent 完全依赖 `read_file` 和 `search_code` 工具在 ReAct 循环中“盲目”收集上下文。这导致两个问题：
+1. **视角盲区**：如果 Agent 没有主动去搜索某个函数的调用方，就会遗漏“接口变更导致调用方失效”这类跨文件 Bug。
+2. **策略不稳定**：不同次审查中，Agent 可能选择不同的工具组合，导致同一 PR 的审查结果不可复现。
+
+**对抗性审查后的修正结论**：不构建全仓库 Code Graph，不引入全局 Two-Pass（成本高、易引入幻觉）。改为**“局部上下文注入”**——只有当 Diff 中出现结构性变更（如导出函数签名变更、接口方法变更）时，才触发一次轻量的单层调用者/被调用者检索，将结果作为“补充上下文”注入 Prompt。
+
+### 12.2 Requirements
+
+**FR-25: 结构性变更检测**
+系统必须解析 Diff 中变更的 Go 文件，识别出“结构性变更”。判定标准为：(1) 导出函数（首字母大写）的签名发生变化（参数或返回值改变）；(2) interface 的方法定义发生变化。普通的函数内部逻辑修改不触发上下文检索。
+
+**FR-26: 局部调用者检索（最多 3 跳）**
+对于检测到的结构性变更函数，系统必须使用 `go/packages` 检索其调用点。检索上限：最多找出 10 个调用点（Callers），如果超出则截断并记录 warning。不检索超过 3 跳的间接调用。
+
+**FR-27: 局部被调用者摘要**
+对于结构性变更函数内部调用的其他包级函数，提取其定义摘要（包名、函数签名、注释），作为 Callees 注入。
+
+**FR-28: 上下文构建与防幻觉约束**
+系统必须将检索结果打包为 `ContextBundle` 结构。在注入 Agent 的 Prompt 时，必须包含防幻觉声明：“补充上下文来自静态分析，可能不完整。请结合代码自身逻辑进行判断，不要将其作为唯一依据。”
+
+**FR-29: 优雅降级**
+如果 `go/packages` 检索失败（如代码存在编译错误），系统必须降级为空上下文（仅审查 Diff），并记录 warning，不得阻塞审查流程。
+
+### 12.3 Interface Freeze Declaration
+
+以下接口在本迭代完成后冻结：
+
+```go
+// StructuralChange 表示 diff 中的结构性变更
+type StructuralChange struct {
+	FilePath     string
+	FunctionName string
+	ChangeType   string // "signature_changed", "interface_changed"
+}
+
+// CallSite 表示一个调用点
+type CallSite struct {
+	FilePath   string
+	Line       int
+	Snippet    string
+	CallerFunc string
+}
+
+// FunctionDef 表示函数定义摘要
+type FunctionDef struct {
+	Package   string
+	Name      string
+	Signature string
+	Doc       string
+}
+
+// ContextBundle 是注入给 Agent 的局部上下文
+type ContextBundle struct {
+	Changes []StructuralChange
+	Callers []CallSite
+	Callees []FunctionDef
+}
+
+// ContextBuilder 定义了上下文构建器的接口
+type ContextBuilder interface {
+	Build(ctx context.Context, diffs []diff.FileDiff) (ContextBundle, error)
+}
+
+// ReviewInput 扩展
+type ReviewInput struct {
+	Diffs       []diff.FileDiff
+	PreFindings []analysis.PreAnalysisFinding
+	Context     ContextBundle
+	Tools       []tools.Tool
+}
+```
+
+### 12.4 Edge Cases
+
+| 场景 | 期望行为 |
+|------|---------|
+| 变更文件解析失败（语法错误） | 跳过该文件的结构性变更检测，继续处理其他文件 |
+| 结构性变更函数的调用点超过 10 个 | 截断至 10 个，附加警告日志 |
+| 变更的是私有函数 | 不触发上下文检索，`ContextBundle` 为空 |
+| 非 Go 文件变更（如 yaml、md） | 不进入 AST 解析流程 |
+| `go/packages` 加载超时（> 10s） | 取消检索，返回空上下文并记录 warning |
+
+## CHANGELOG
+
+### v1.1 (2026-10-17) — tag: v1.1-complete
+- ADDED: 局部上下文注入（`ContextBundle`：结构性变更 + 调用点 + 被调用者摘要，FR-25~FR-29）
+- ADDED: 结构性变更检测（go/ast 解析 diff，导出函数签名/接口方法集变更）
+- ADDED: `go/packages` 轻量级调用者检索（go/packages + 10s 超时 + 最多 10 个调用点截断）
+- ADDED: 同包被调用者摘要提取（签名 + 首行注释）
+- ADDED: `internal/context/` 包（types/builder/detector/callers/callees/builder_impl）
+- MODIFIED: ReviewInput 结构体（新增 `Context ContextBundle` 字段）
+- MODIFIED: 所有审查 Agent 的 User message（三段式：`## 代码变更` / `## 静态分析发现` / `## 补充上下文`）
+- MODIFIED: System Prompt 末尾追加防幻觉声明（FR-28）

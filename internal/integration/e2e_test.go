@@ -288,3 +288,78 @@ func TestE2EDegradedAllToolsDisabled(t *testing.T) {
 	assert.Empty(t, runRes.Findings)
 	assert.Less(t, runRes.Duration, 30*time.Second)
 }
+
+// e2eContextModule creates a Go module whose exported function signature
+// was changed and that has three call sites, returning its root and the
+// unified diff of the change.
+func e2eContextModule(t *testing.T) (root, diffText string) {
+	t.Helper()
+	root = t.TempDir()
+	files := map[string]string{
+		"go.mod":  "module e2ectx\n\ngo 1.26\n",
+		"calc.go": "package e2ectx\n\nfunc CalculateTotal(items []int, tax float64) int {\n\treturn len(items)\n}\n",
+		"callers.go": "package e2ectx\n\n" +
+			"func A() int { return CalculateTotal(nil, 0) }\n\n" +
+			"func B() int { return CalculateTotal(nil, 0) }\n\n" +
+			"func C() int { return CalculateTotal(nil, 0) }\n",
+	}
+	for name, content := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte(content), 0o644), "write %s", name)
+	}
+	diffText = `diff --git a/calc.go b/calc.go
+index 83db48f..2c47bf9 100644
+--- a/calc.go
++++ b/calc.go
+@@ -1,5 +1,5 @@
+ package e2ectx
+ 
+-func CalculateTotal(items []int) int {
++func CalculateTotal(items []int, tax float64) int {
+ 	return len(items)
+ }
+`
+	return root, diffText
+}
+
+// TestE2EContextInjectionOnSignatureChange is the v1.1 T28 deliverable: a
+// PR changing an exported function signature must trigger the real
+// ContextBuilder, and the retrieved call sites must be injected into the
+// agent's ReviewInput (AC-52, AC-55, AC-56).
+func TestE2EContextInjectionOnSignatureChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e test runs the real go/packages loader; skipped in -short mode")
+	}
+	root, diffText := e2eContextModule(t)
+	logger := zap.NewNop()
+
+	agent := &recordingAgent{name: "security"}
+	orch := orchestrator.New(logger, root, []agents.ReviewAgent{agent},
+		func(string) orchestrator.Verifier { return passthroughVerifier{} }, nil)
+	// Skip static analysis: this test exercises the context builder only.
+	orch.SetAnalysisConfig(config.StaticAnalysisConfig{Enabled: false})
+
+	if _, err := orch.Run(context.Background(), orchestrator.Input{
+		RepoFullName:  "owner/repo",
+		PRNumber:      3,
+		HeadSHA:       "ctxsha",
+		DiffText:      diffText,
+		WorkspaceRoot: root,
+	}); err != nil {
+		t.Fatalf("orchestrator.Run: %v", err)
+	}
+
+	require.Len(t, agent.ins, 1, "agent must be invoked once")
+	bundle := agent.ins[0].Context
+
+	require.Len(t, bundle.Changes, 1, "structural change not detected: %+v", bundle.Changes)
+	assert.Equal(t, "CalculateTotal", bundle.Changes[0].FunctionName)
+	assert.Equal(t, "signature_changed", bundle.Changes[0].ChangeType)
+
+	require.Len(t, bundle.Callers, 3, "call sites not injected: %+v", bundle.Callers)
+	for _, c := range bundle.Callers {
+		assert.Equal(t, "callers.go", c.FilePath)
+		assert.Positive(t, c.Line)
+		assert.Contains(t, c.Snippet, "CalculateTotal")
+		assert.NotEmpty(t, c.CallerFunc)
+	}
+}

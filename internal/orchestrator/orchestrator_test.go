@@ -15,6 +15,7 @@ import (
 
 	"codereviewagent/internal/ai/agents"
 	itools "codereviewagent/internal/ai/tools"
+	ctxcontext "codereviewagent/internal/context"
 	"codereviewagent/internal/diff"
 )
 
@@ -331,5 +332,65 @@ index 83db48f..2c47bf9 100644
 	}
 	if len(res.ReviewedFiles) != 1 || res.ReviewedFiles[0] != "users.go" {
 		t.Errorf("ReviewedFiles = %v, want [users.go]", res.ReviewedFiles)
+	}
+}
+
+// capturingAgent records the ReviewInput it received (T26).
+type capturingAgent struct {
+	name string
+	mu   sync.Mutex
+	in   agents.ReviewInput
+}
+
+func (c *capturingAgent) Name() string { return c.name }
+
+func (c *capturingAgent) Review(_ context.Context, in agents.ReviewInput) ([]agents.AgentFinding, error) {
+	c.mu.Lock()
+	c.in = in
+	c.mu.Unlock()
+	return nil, nil
+}
+
+// mockContextBuilder returns a fixed bundle (T26).
+type mockContextBuilder struct{ bundle ctxcontext.ContextBundle }
+
+func (m mockContextBuilder) Build(_ context.Context, _ []diff.FileDiff) (ctxcontext.ContextBundle, error) {
+	return m.bundle, nil
+}
+
+// TestOrchestratorInjectsLocalContext verifies the orchestrator builds the
+// local context and passes it into every agent's ReviewInput (T26).
+func TestOrchestratorInjectsLocalContext(t *testing.T) {
+	agent := &capturingAgent{name: "security"}
+	o := newTestOrchestrator(t, []agents.ReviewAgent{agent}, nil)
+
+	bundle := ctxcontext.ContextBundle{
+		Changes: []ctxcontext.StructuralChange{{
+			FilePath: "calc.go", FunctionName: "CalculateTotal", ChangeType: ctxcontext.SignatureChanged,
+		}},
+		Callers: []ctxcontext.CallSite{{
+			FilePath: "main.go", Line: 10, Snippet: "CalculateTotal(items)", CallerFunc: "main",
+		}},
+		Callees: []ctxcontext.FunctionDef{{
+			Package: "calc", Name: "helper", Signature: "helper(int) (int)",
+		}},
+	}
+	o.SetContextBuilderFactory(func(string) ContextBuilder { return mockContextBuilder{bundle: bundle} })
+
+	if _, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 1, HeadSHA: "ctxsha", DiffText: reviewDiff(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := agent.in.Context
+	if len(got.Changes) != 1 || len(got.Callers) != 1 || len(got.Callees) != 1 {
+		t.Fatalf("agent did not receive the context bundle: %+v", got)
+	}
+	if got.Callers[0].Snippet != "CalculateTotal(items)" {
+		t.Errorf("caller snippet = %q, want CalculateTotal(items)", got.Callers[0].Snippet)
+	}
+	if got.Changes[0].ChangeType != ctxcontext.SignatureChanged {
+		t.Errorf("change type = %q", got.Changes[0].ChangeType)
 	}
 }
