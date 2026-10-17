@@ -174,3 +174,37 @@
 - [x] 所有 AC-50 ~ AC-61 通过（AC-60 受环境限制，见上文说明）
 - [x] `spec.md` 的 CHANGELOG 已更新
 - [ ] git tag `v1.1-complete` 已打 ← 由用户人工执行
+
+## v1.6 评估体系验收
+
+### 指标计算验收
+
+- [x] AC-62: Given 数据集有 1 个样本，Ground Truth 包含 1 条 SQL 注入，When 执行评估，Then 若 Agent 发现该问题，TP=1，FN=0
+  - ✅ 单元测试 `TestEvaluatorMatchesGroundTruth`（TP=1/FN=0）；真实 `make eval`：TP=2、FN=0（两条 GT 均命中）
+- [x] AC-63: Given Agent 报告了 1 条未在 Ground Truth 中的逻辑错误，When 执行评估，Then 不计入 FP，而是记入 `UBVItems`（unreviewed_discovery=1）
+  - ✅ `TestEvaluatorUBVInsteadOfFalsePositive`；真实运行 UBV=1（lint 在 db.go:19 的 style 发现）
+- [x] AC-64: Given 指定 baseline 报告的 Precision 为 50%，当前报告为 60%，When 执行评估，Then `precision_delta` 字段输出 0.1
+  - ✅ `TestEvaluatorDelta`（0.1，四舍五入到 4 位）；真实运行 delta=+0.167（基线 0.5→0.6667）
+
+### 报告与 CLI 验收
+
+- [x] AC-65: Given 评估执行完毕，When 检查 `eval/report.md`，Then 包含 UBV 的详细列表和供人工复制的 JSON 片段
+  - ✅ `eval/report.md` 含代码块高亮 + `ground_truth.json` 可复制 JSON；`reporter_test.go` 覆盖（含 >50 截断告警）
+- [x] AC-66: Given 在项目根目录执行 `make eval`，When 运行结束，Then 控制台输出评估摘要，且生成 `metrics.json` 和 `report.md`
+  - ✅ 控制台输出 TP/FN/UBV/Precision/Recall/Delta 摘要；生成 `eval/metrics.json` + `eval/report.md`
+
+### 代码质量验收
+
+- [x] AC-67: 执行 `golangci-lint run ./...` 无 error 级别问题
+  - ✅ `internal/eval/` 与 `cmd/eval/` 无 error 级别问题（历史 warning 级风格问题不计）
+- [ ] AC-68: 执行 `go test ./... -race` 全部通过
+  - ⚠️ 本机无 gcc（`-race` 依赖 cgo），无法执行；已执行 `go test ./...` 全量通过。请在具备 gcc 的环境补充执行
+- [x] AC-69: `eval` 逻辑测试独立，不依赖真实 LLM 调用（使用 mock Orchestrator）
+  - ✅ `evaluator_test.go` 定义 `MockOrchestrator` 返回预设 `[]VerifiedFinding`，测试 <1s、无网络
+
+## 迭代交付清单
+
+- [x] git tag `v1.6-start` 已打
+- [x] 所有 AC-62 ~ AC-69 通过（AC-68 受环境限制，见上文说明）
+- [x] `spec.md` 的 CHANGELOG 已更新
+- [ ] git tag `v1.6-complete` 已打 ← 由用户人工执行

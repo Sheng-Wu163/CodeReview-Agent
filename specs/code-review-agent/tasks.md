@@ -384,3 +384,64 @@ T10 + T11 + T12 → T13 → T14
 - **依赖**：T27
 - **预估**：2h
 - **状态**：✅ 已完成
+
+## 阶段七：v1.6 评估体系（T29-T33）
+
+### T29: 数据集与报告的数据结构定义
+- **描述**：在 `internal/eval/` 下定义 `GroundTruthItem`、`EvalMetrics`、`EvalReport` 结构体及 JSON 序列化标签。
+- **文件路径**：
+  - `internal/eval/types.go`
+- **完成标准**：`go build ./...` 通过；结构体严格匹配接口冻结声明。
+- **依赖**：T1
+- **预估**：1h
+- **状态**：✅ 已完成
+
+### T30: 数据集读取与指标计算引擎
+- **描述**：实现从 `eval/dataset/` 目录读取指定样本的逻辑。实现匹配算法：将 Agent 输出的 `VerifiedFinding` 与 `GroundTruthItem` 按（FilePath + Line +/- 2 行容差 + Category）进行匹配。计算 Precision/Recall，不匹配的发现归入 `UBVItems`。
+- **文件路径**：
+  - `internal/eval/evaluator.go`
+  - `internal/eval/evaluator_test.go`
+- **完成标准**：
+  - 对模拟输入，精准计算出 TP、FN、UBV 数量
+  - 计算出的 Delta 结果符合预期（如 Baseline 为 50%，当前为 60%，则 Delta 为 10%）
+- **依赖**：T29
+- **预估**：4h
+- **状态**：✅ 已完成
+
+### T31: UBV 报告生成器
+- **描述**：实现将 `UBVItems` 渲染为 Markdown 格式的逻辑。报告需包含文件路径、行号、代码片段、Agent 给出的修改建议，并提供占位符供人工评估后复制到 `ground_truth.json`。
+- **文件路径**：
+  - `internal/eval/reporter.go`
+  - `internal/eval/reporter_test.go`
+- **完成标准**：生成的 Markdown 语法正确，信息完整。
+- **依赖**：T30
+- **预估**：2h
+- **状态**：✅ 已完成
+
+### T32: CLI 评估执行器与测试数据集
+- **描述**：
+  1. 在 `cmd/eval/main.go` 编写入口程序。
+  2. 编写 `Makefile` 的 `eval` 命令。
+  3. 手工在 `eval/dataset/sample-1/` 下构造一个最小真实的测试用例（包含一个已知的 SQL 注入、一个未处理错误，以及对应的 `ground_truth.json`）。
+- **文件路径**：
+  - `cmd/eval/main.go`
+  - `Makefile`
+  - `eval/dataset/sample-1/*`
+- **完成标准**：
+  - 执行 `make eval` 能读取样本，真实调用 Orchestrator 运行审查，并生成 `eval/report.md` 和 `eval/metrics.json`。
+- **依赖**：T31, T26 (Orchestrator)
+- **预估**：4h
+- **状态**：✅ 已完成
+
+### T33: v1.6 集成测试与交付
+- **描述**：
+  1. 运行 `make eval`，确认端到端跑通。
+  2. 更新 `spec.md` 的 CHANGELOG 并标记完成。
+  3. 更新 `checklist.md`，标记 AC 通过。
+  4. 提示用户打 tag。
+- **文件路径**：
+  - `specs/code-review-agent/*`
+- **完成标准**：测试通过，输出提示：“v1.6 交付完成，请执行 git tag v1.6-complete”。
+- **依赖**：T32
+- **预估**：1h
+- **状态**：✅ 已完成

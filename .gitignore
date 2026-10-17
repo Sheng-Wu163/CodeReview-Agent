@@ -25,3 +25,7 @@ pgdata/
 
 # Local runtime config (may contain real secrets)
 configs/config.yaml
+
+# Eval outputs (generated; keep dataset, ignore reports)
+eval/report.md
+eval/metrics.json

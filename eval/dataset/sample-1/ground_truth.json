@@ -1,0 +1,16 @@
+[
+  {
+    "FilePath": "db.go",
+    "Line": 13,
+    "Severity": "critical",
+    "Category": "security",
+    "Message": "SQL injection: query built by string concatenation with userID"
+  },
+  {
+    "FilePath": "db.go",
+    "Line": 19,
+    "Severity": "warning",
+    "Category": "logic",
+    "Message": "unhandled json.Unmarshal error return"
+  }
+]

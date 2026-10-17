@@ -96,14 +96,16 @@ func (t ReadFileTool) Call(_ context.Context, input string) (string, error) {
 }
 
 // parseRangeInput splits "<path>[:start[:end]]" into its parts. Line numbers
-// are 1-based; 0 means unset (whole file).
+// are 1-based; 0 means unset (whole file). Surrounding quotes are stripped:
+// LLMs frequently emit the tool argument quoted ("db.go").
 func parseRangeInput(input string) (path string, start, end int, err error) {
 	input = strings.TrimSpace(input)
+	input = strings.Trim(input, `"`)
 	if input == "" {
 		return "", 0, 0, fmt.Errorf("empty input")
 	}
 	parts := strings.Split(input, ":")
-	path = parts[0]
+	path = strings.Trim(strings.TrimSpace(parts[0]), `"`)
 	switch len(parts) {
 	case 1:
 		return path, 0, 0, nil

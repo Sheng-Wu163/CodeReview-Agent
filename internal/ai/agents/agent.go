@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tmc/langchaingo/agents"
+	"github.com/tmc/langchaingo/chains"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/tools"
 
@@ -30,6 +31,13 @@ const (
 
 // maxAgentIterations bounds the ReAct loop of every review agent.
 const maxAgentIterations = 8
+
+// maxCompletionTokens bounds each LLM completion. OpenAI-compatible
+// reasoning endpoints count hidden reasoning tokens against the budget, so
+// the final content is truncated to empty (finish_reason=length) when the
+// cap is too tight; a generous budget keeps the reasoning from starving the
+// agent's Final Answer.
+const maxCompletionTokens = 16384
 
 // AgentFinding is a single issue reported by a review agent. The JSON tags
 // define the schema the agents must emit in their Final Answer.
@@ -112,7 +120,8 @@ func (a *reviewAgent) Review(ctx context.Context, input ReviewInput) ([]AgentFin
 	executor := agents.NewExecutor(react, agents.WithMaxIterations(maxAgentIterations))
 
 	question := buildReviewQuestion(systemPrompt, input)
-	result, err := executor.Call(ctx, map[string]any{"input": question})
+	result, err := executor.Call(ctx, map[string]any{"input": question},
+		chains.WithMaxTokens(maxCompletionTokens))
 	if err != nil {
 		return nil, fmt.Errorf("%s agent execution: %w", a.name, err)
 	}

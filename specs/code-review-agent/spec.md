@@ -479,3 +479,83 @@ type ReviewInput struct {
 - MODIFIED: ReviewInput 结构体（新增 `Context ContextBundle` 字段）
 - MODIFIED: 所有审查 Agent 的 User message（三段式：`## 代码变更` / `## 静态分析发现` / `## 补充上下文`）
 - MODIFIED: System Prompt 末尾追加防幻觉声明（FR-28）
+
+## 13. v1.6 评估体系（相对趋势与复核机制）
+
+### 13.1 Why
+
+在 v1.3 和 v1.1 引入后，我们需要量化审查质量以指导后续迭代（如 v1.2 的自适应策略）。但传统的 Precision/Recall 绝对分数存在致命缺陷：
+1. **样本偏差**：人工标注（Ground Truth）是不完整的。如果 Agent 发现了一个标注者没注意到的真实 Bug，传统计算会将其记为 False Positive，从而**惩罚“发现意外真实问题”的能力**。
+2. **阈值僵化**：追求绝对高分（如 Precision > 90%）会导致 Agent 倾向于只报告“教科书式”的简单问题，而忽略复杂的隐蔽逻辑。
+
+**修正结论**：建立**相对趋势评估**体系。不追求绝对数值达标，只关注“v1.6 相比 v1.1 是变好了还是变差了”。同时引入 `unexpected_but_valid`（UBV）复核机制，将疑似误报转为人工确认队列，动态修正评估基线。
+
+### 13.2 Requirements
+
+**FR-30: 离线评估数据集格式**
+系统必须支持读取本地 `eval/dataset/` 目录下的评估样本。每个样本包含：`pr.diff`（变更内容）、`source_files/`（受影响的源文件）、以及 `ground_truth.json`（人工标注的预期发现列表，允许不完整）。
+
+**FR-31: 相对趋势计算器**
+评估脚本必须计算当前版本相对于指定 baseline（例如上一个 tag）的 `Precision Delta` 和 `Recall Delta`。评估报告侧重于展示变化趋势，而非绝对值。
+
+**FR-32: UBV (Unexpected But Valid) 复核机制**
+当 Agent 报告的发现与 Ground Truth 不匹配时，**不直接标记为 False Positive**。而是将其归类为 `Unreviewed_Discovery`，并输出到一个单独的 Markdown 复核报告中。
+人工（开发者）审阅该报告后，可以在 `ground_truth.json` 中追加这条发现。评估脚本下次运行时，将基于更新后的 Ground Truth 重新计算指标。
+
+**FR-33: 自动化评估执行器**
+提供 CLI 命令 `make eval`，它能批量读取 `eval/dataset/` 中的样本，调用完整的审查管道（Orchestrator），对比 Ground Truth 并生成最终评估报告（`eval/report.md` 和 `eval/metrics.json`）。
+
+### 13.3 Interface Freeze Declaration
+
+以下接口在本迭代完成后冻结：
+
+```go
+// GroundTruthItem 人工标注的预期问题
+type GroundTruthItem struct {
+	FilePath string
+	Line     int
+	Severity string
+	Category string // "security", "logic", "performance", "style"
+	Message  string
+}
+
+// EvalMetrics 评估指标
+type EvalMetrics struct {
+	TruePositives      int     `json:"tp"`
+	FalseNegatives     int     `json:"fn"`
+	UnreviewedDiscovery int    `json:"ubv"` // 待复核发现数
+	Precision          float64 `json:"precision"`
+	Recall             float64 `json:"recall"`
+}
+
+// EvalReport 最终评估报告结构
+type EvalReport struct {
+	Version       string      `json:"version"`
+	BaselineVersion string    `json:"baseline_version"`
+	Metrics       EvalMetrics `json:"metrics"`
+	PrecisionDelta float64    `json:"precision_delta"`
+	RecallDelta    float64    `json:"recall_delta"`
+	UBVItems      []AgentFinding `json:"ubv_items"`
+}
+```
+
+### 13.4 Edge Cases
+
+| 场景 | 期望行为 |
+|------|---------|
+| 数据集为空 | 报错退出，提示需提供至少 1 个测试样本 |
+| 某次审查因 LLM API 超时中断 | 记录该样本为 `failed`，跳过计算，不中断整体流程 |
+| 生成的 UBV 报告过大（> 50 条） | 仅输出前 50 条，提示“请检查 Agent 是否发生幻觉” |
+| Ground Truth 中某条预期问题未被发现 | 记为 False Negative，但不阻塞交付（允许当前版本存在 FN） |
+
+## CHANGELOG
+
+### v1.6 (2026-10-18) — tag: v1.6-complete
+- ADDED: 离线评估数据集格式（`eval/dataset/<sample>/{pr.diff,source_files/,ground_truth.json}`，FR-30）
+- ADDED: 相对趋势计算逻辑（Precision/Recall Delta，FR-31）
+- ADDED: UBV（Unexpected-But-Valid）复核机制，输出 Markdown 报告（>50 条截断告警，FR-32）
+- ADDED: CLI 评估执行器 `cmd/eval` + `make eval`（生成 `eval/metrics.json` 与 `eval/report.md`，FR-33）
+- ADDED: `internal/eval/` 包（types/evaluator/reporter）+ 数据集样本 `sample-1`
+- FIXED: 剥离 ReAct 模板注入的 `stop` 序列——推理模型在隐藏推理中回显 "Observation:" 被截断导致 content 为空（agent 报 "unable to parse agent output"）
+- FIXED: 提高 completion token 预算（4096→16384），避免推理 token 挤占最终内容
+- FIXED: `read_file` 容忍 LLM 传参带引号（`"db.go"`）
