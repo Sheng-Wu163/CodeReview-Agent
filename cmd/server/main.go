@@ -19,6 +19,7 @@ import (
 	"codereviewagent/internal/ai/tools"
 	"codereviewagent/internal/config"
 	"codereviewagent/internal/db"
+	"codereviewagent/internal/feedback"
 	"codereviewagent/internal/github"
 	"codereviewagent/internal/handler"
 	"codereviewagent/internal/middleware"
@@ -74,6 +75,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create dashboard: %w", err)
 	}
+	dashboard.SetFeedbackRepo(repository.NewFeedbackRepo(pool))
 	dashboard.Register(r)
 
 	// Full review pipeline: LLM + 4 review agents + verifier + orchestrator.
@@ -102,8 +104,12 @@ func run() error {
 	pipeline := orchestrator.NewPipeline(orch, ghClient, store, cfg.GitHubToken, logger)
 	reviewProc = eventProcessorAdapter{pipeline: pipeline}
 
+	// v1.4: implicit feedback tracking over synchronize/closed events.
+	feedbackRepo := repository.NewFeedbackRepo(pool)
+	var feedbackTracker handler.FeedbackTracker = feedback.NewTracker(feedbackRepo, ghClient, cfg.Feedback.SimilarityThreshold, logger)
+
 	r.With(middleware.HMACVerify(cfg.WebhookSecret)).
-		Post("/webhook", handler.NewWebhook(logger, reviewProc).ServeHTTP)
+		Post("/webhook", handler.NewWebhook(logger, reviewProc, feedbackTracker).ServeHTTP)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.ServerPort,

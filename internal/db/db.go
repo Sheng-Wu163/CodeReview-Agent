@@ -88,6 +88,45 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// EnsureDatabase creates the target database of databaseURL if it does not
+// exist yet. It connects to the server's administrative "postgres" database
+// to check and create. Test suites use it to give each package its own
+// database so that parallel `go test ./...` runs cannot truncate each
+// other's fixtures.
+func EnsureDatabase(ctx context.Context, databaseURL string) error {
+	u, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return fmt.Errorf("parse database url: %w", err)
+	}
+	dbName := u.ConnConfig.Database
+	if dbName == "" || dbName == "postgres" {
+		return nil
+	}
+
+	adminCfg := *u.ConnConfig
+	adminCfg.Database = "postgres"
+	admin, err := pgx.ConnectConfig(ctx, &adminCfg)
+	if err != nil {
+		return fmt.Errorf("connect admin database: %w", err)
+	}
+	defer admin.Close(ctx)
+
+	var exists bool
+	if err := admin.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)", dbName,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("check database %s: %w", dbName, err)
+	}
+	if exists {
+		return nil
+	}
+	// Identifiers from config are trusted; quote them defensively.
+	if _, err := admin.Exec(ctx, fmt.Sprintf("CREATE DATABASE %q", dbName)); err != nil {
+		return fmt.Errorf("create database %s: %w", dbName, err)
+	}
+	return nil
+}
+
 // MigrateFromURL is a convenience helper that connects to databaseURL, runs
 // migrations and returns the pool ready for use.
 func MigrateFromURL(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {

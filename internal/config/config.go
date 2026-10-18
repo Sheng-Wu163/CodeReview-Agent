@@ -29,6 +29,17 @@ type Config struct {
 	Filter FilterConfig `mapstructure:"filter"`
 	// StaticAnalysis configures the pre-analysis pipeline (FR-24).
 	StaticAnalysis StaticAnalysisConfig `mapstructure:"static_analysis"`
+	// Feedback configures the v1.4 implicit feedback tracking.
+	Feedback FeedbackConfig `mapstructure:"feedback"`
+}
+
+// FeedbackConfig holds the implicit feedback tracker settings (v1.4
+// FR-42): a tracked code region whose similarity to the review-time code
+// is below the threshold counts as modified.
+type FeedbackConfig struct {
+	// SimilarityThreshold is the modification threshold in [0,1]; the
+	// default is 0.8.
+	SimilarityThreshold float64 `mapstructure:"similarity_threshold"`
 }
 
 // FilterConfig configures which files are excluded from review.
@@ -141,6 +152,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("static_analysis.adaptive.trivial_max_lines", 20)
 	v.SetDefault("static_analysis.adaptive.complex_min_lines", 200)
 	v.SetDefault("static_analysis.adaptive.complex_min_files", 5)
+	v.SetDefault("feedback.similarity_threshold", 0.8)
 
 	// Environment variable bindings. BindEnv ensures that Unmarshal picks up
 	// environment values even for keys that are absent from the YAML file.

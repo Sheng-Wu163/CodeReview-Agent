@@ -248,3 +248,46 @@
 - [x] 所有 AC-70 ~ AC-80 通过（AC-79 受环境限制，见上文说明）
 - [x] `spec.md` 的 CHANGELOG 已更新
 - [ ] git tag `v1.2-complete` 已打 ← 由用户人工执行
+
+## v1.4 隐式反馈追踪验收
+
+### 数据库与事件验收
+
+- [x] AC-81: Given 迁移命令执行, When 检查 `findings` 表, Then 包含 `feedback_status` 字段且默认值为 `pending`
+  - ✅ migration `004_add_feedback.sql`（任务文档写的 002 与既有迁移重号，实际使用 004）+ `TestFeedbackPendingQuery` 验证默认 pending
+- [x] AC-82: Given 收到 `pull_request` 的 `synchronize` 事件, When Handler 处理, Then 提取 `before` 和 `after` SHA 并调用 Tracker
+  - ✅ `webhook_test.go` TestWebhookSynchronizeTriggersTracker（校验 after/before 顺序映射 newSHA/oldSHA）
+- [x] AC-83: Given 收到 `pull_request` 的 `closed` 事件且 `merged=true`, When Handler 处理, Then 调用 Tracker 的关闭逻辑
+  - ✅ TestWebhookClosedTriggersTracker
+
+### 状态流转验收
+
+- [x] AC-84: Given 某条 finding 处于 `pending`，When 随后的 commit 修改了该 finding 所在的代码行, Then `feedback_status` 更新为 `accepted_implicit`
+  - ✅ `tracker_test.go` TestTrackerSynchronizeModified（相似度 < 0.8）+ e2e TestE2EFeedbackLifecycle
+- [x] AC-85: Given 某条 finding 处于 `pending`，When PR 直接合并且代码未变, Then `feedback_status` 更新为 `ignored_implicit`
+  - ✅ TestTrackerClosedResolvesPending（guarded UPDATE 幂等，重复事件不再变更）
+- [x] AC-86: Given 某条 finding 所在的文件在后续 commit 中被删除, Then `feedback_status` 更新为 `accepted_implicit`
+  - ✅ TestTrackerSynchronizeFileDeleted（404 → ErrFileNotFound → accepted_implicit）
+
+### 统计与展示验收
+
+- [x] AC-87: Given 数据库中包含 10 条已解决（接受/忽略）的 finding, When 访问 `GET /api/metrics/feedback`, Then 返回按 Agent 分组的正确采纳率数据
+  - ✅ `TestAPIMetricsFeedback`（accept_rate = accepted/(accepted+ignored)）+ e2e 阶段 5
+- [x] AC-88: Given 访问仪表盘, When 页面渲染, Then 正确展示各 Agent 的采纳率百分比
+  - ✅ `TestDashboardRendersFeedbackStats`（进度条 + 百分比单元格）
+
+### 代码质量验收
+
+- [x] AC-89: 执行 `golangci-lint run ./...` 无 error 级别问题
+  - ✅ `internal/feedback/` 0 issues（历史 warning 级风格问题不计）
+- [ ] AC-90: 执行 `go test ./... -race` 全部通过
+  - ⚠️ 本机无 gcc（`-race` 依赖 cgo），无法执行；已执行 `go test ./...` 全量通过。请在具备 gcc 的环境补充执行
+- [x] AC-91: `internal/feedback/` 下所有导出函数和类型均有文档注释
+  - ✅ 全部导出符号带 doc comment
+
+## 迭代交付清单
+
+- [x] git tag `v1.4-start` 已打
+- [x] 所有 AC-81 ~ AC-91 通过（AC-90 受环境限制，见上文说明）
+- [x] `spec.md` 的 CHANGELOG 已更新
+- [ ] git tag `v1.4-complete` 已打 ← 由用户人工执行

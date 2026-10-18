@@ -50,3 +50,7 @@ static_analysis:
     complex_min_lines: 200      # > this many changed lines => Complex
     complex_min_files: 5        # > this many files => Complex
     sensitive_paths: []         # e.g. ["internal/auth", "migrations"]
+
+# v1.4 implicit feedback tracking (FR-42).
+feedback:
+  similarity_threshold: 0.8     # < 0.8 similarity counts as "code modified"

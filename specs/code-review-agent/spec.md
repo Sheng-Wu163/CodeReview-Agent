@@ -641,3 +641,75 @@ type StrategySelector interface {
 - MODIFIED: Orchestrator 按策略执行 Agent，被跳过的 Agent 记录为 `skipped_by_strategy`（FR-37）
 - MODIFIED: `reviews` 表新增 `agent_status`（JSONB，migration 003）持久化各 Agent 状态（AC-77）
 - FIXED: golangci-lint 单实例锁增加进程内互斥（修复 pipeline 多 worker 并发自锁）+ 跨进程退避重试
+
+## 15. v1.4 隐式反馈追踪
+
+### 15.1 Why
+
+在真实工程中，开发者极少会在 PR 评论中显式回复“已修复”或“误报”。如果系统只依赖显式反馈，样本会严重偏向“情绪化评论”，导致模型优化方向跑偏。
+**修正结论**：引入隐式反馈信号。系统通过追踪 PR 的后续 Push（`synchronize` 事件）和合并状态（`closed` 且 `merged`），自动推断开发者对审查发现的真实态度，构建无偏的反馈数据集。
+
+### 15.2 Requirements
+
+**FR-39: 数据库 Schema 扩展**
+系统必须在 `findings` 表中增加 `feedback_status` 字段，枚举值为：`pending`（待定）、`accepted_implicit`（隐式接受：代码被修改）、`ignored_implicit`（隐式忽略：代码未改但 PR 合并）、`accepted_explicit`（显式接受，预留）、`rejected_explicit`（显式拒绝，预留）。同时新增 `pr_commits` 表，记录 PR 的每次 commit 历史。
+
+**FR-40: Webhook 事件扩展**
+系统必须扩展 Webhook 处理逻辑，支持监听 `pull_request` 的 `synchronize`（新代码推送到 PR）和 `closed`（PR 关闭/合并）动作。
+
+**FR-41: 隐式反馈追踪器（ImplicitFeedbackTracker）**
+- **收到 `synchronize` 事件时**：对比新的 commit 与审查发生时的旧 commit，如果发现某条 `pending` 的 finding 所在文件对应的代码行被修改，则将其状态更新为 `accepted_implicit`。
+- **收到 `closed` 事件且 `merged=true` 时**：对于所有仍为 `pending` 的 finding，若在后续 commit 中未被修改，则更新为 `ignored_implicit`。
+
+**FR-42: 纯文本级代码比对**
+为了避免引入高成本的 AST 对比（容易引入偏差），隐式追踪器必须使用**基于字符串相似度的局部 diff 比对**。只对比 finding 指向的文件及周围 10 行代码。如果新代码与旧代码相似度 < 80%，视为“已被修改”。
+
+**FR-43: 统计看板**
+仪表盘必须新增“Agent 发现采纳率”指标，按显式 + 隐式综合计算接受率，并提供按 Agent 类型（安全、逻辑等）分组的统计数据。
+
+### 15.3 Interface Freeze Declaration
+
+```go
+type FeedbackStatus string
+
+const (
+	StatusPending          FeedbackStatus = "pending"
+	StatusAcceptedImplicit FeedbackStatus = "accepted_implicit"
+	StatusIgnoredImplicit  FeedbackStatus = "ignored_implicit"
+	// 预留：StatusAcceptedExplicit, StatusRejectedExplicit
+)
+
+// PRCommit 记录 PR 的提交历史
+type PRCommit struct {
+	RepoFullName string
+	PRNumber     int
+	SHA          string
+	CreatedAt    time.Time
+}
+
+// FeedbackTracker 定义反馈追踪接口
+type FeedbackTracker interface {
+	TrackOnSynchronize(ctx context.Context, repo string, prNumber int, newSHA string, oldSHA string) error
+	TrackOnClosed(ctx context.Context, repo string, prNumber int, isMerged bool) error
+}
+```
+
+### 15.4 Edge Cases
+
+| 场景 | 期望行为 |
+|------|---------|
+| PR 被直接关闭（未合并） | 所有 `pending` 状态的 finding 标记为 `ignored_implicit`（或直接忽略，不做采纳率计算） |
+| 后续 Push 删除了 finding 所在的整个文件 | 视为 `accepted_implicit`（通过删除解决了问题） |
+| Webhook 漏发了某个 commit | 允许追踪失效，系统在每日定时任务中通过 GitHub API 拉取缺失历史进行修正（v1.5实现，当前记录日志即可） |
+
+## CHANGELOG
+
+### v1.4 (2026-10-18) — tag: v1.4-complete
+- ADDED: 隐式反馈追踪机制（synchronize/closed → accepted_implicit/ignored_implicit，FR-41）
+- ADDED: findings 表扩展 `feedback_status` 字段（默认 pending，AC-81）
+- ADDED: `pr_commits` 表（commit 历史，去重，FR-39）
+- ADDED: 统计看板的采纳率指标（`GET /api/metrics/feedback` + 仪表盘进度条，FR-43）
+- ADDED: `internal/feedback/` 包（types/tracker/diff_compare，纯文本相似度比对 FR-42）
+- ADDED: `github.Client.GetFileAtRef`（按 ref 拉取文件，404 → ErrFileNotFound）
+- ADDED: `db.EnsureDatabase`（测试包数据库隔离，消除并行 truncate 互相干扰）
+- MODIFIED: Webhook 处理 `synchronize`（before/after SHA）与 `closed`（merged）动作，异步分发 Tracker（FR-40）

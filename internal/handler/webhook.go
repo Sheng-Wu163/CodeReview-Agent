@@ -31,28 +31,42 @@ type PullRequestProcessor interface {
 	Process(ctx context.Context, event PullRequestEvent)
 }
 
+// FeedbackTracker handles the synchronize/closed PR events for implicit
+// feedback tracking (v1.4 FR-41); feedback.Tracker implements it. Defined
+// in the consumer per convention.
+type FeedbackTracker interface {
+	TrackOnSynchronize(ctx context.Context, repo string, prNumber int, newSHA string, oldSHA string) error
+	TrackOnClosed(ctx context.Context, repo string, prNumber int, isMerged bool) error
+}
+
 // Webhook handles GitHub webhook events. It expects the request body to have
 // already passed HMAC signature verification (see middleware.HMACVerify).
 type Webhook struct {
 	logger    *zap.Logger
 	processor PullRequestProcessor // may be nil
+	tracker   FeedbackTracker      // may be nil (v1.4 implicit feedback)
 }
 
-// NewWebhook creates a new Webhook handler. processor may be nil, in which
-// case accepted pull_request events are only logged.
-func NewWebhook(logger *zap.Logger, processor PullRequestProcessor) *Webhook {
-	return &Webhook{logger: logger, processor: processor}
+// NewWebhook creates a new Webhook handler. processor and tracker may be
+// nil, in which case the corresponding events are only logged.
+func NewWebhook(logger *zap.Logger, processor PullRequestProcessor, tracker FeedbackTracker) *Webhook {
+	return &Webhook{logger: logger, processor: processor, tracker: tracker}
 }
 
 // pullRequestPayload is the subset of the GitHub pull_request webhook payload
 // that this handler needs to parse.
 type pullRequestPayload struct {
-	Action      string `json:"action"`
-	Number      int    `json:"number"`
+	Action string `json:"action"`
+	Number int    `json:"number"`
+	// Before/After are the push SHAs of a synchronize event (FR-40).
+	Before      string `json:"before"`
+	After       string `json:"after"`
 	PullRequest struct {
 		Head struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
+		// Merged is true when a closed event actually merged the PR.
+		Merged bool `json:"merged"`
 	} `json:"pull_request"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -82,50 +96,102 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		h.logger.Sugar().Infow("ignored webhook event", "event", eventType)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(fmt.Sprintf("event %s ignored", eventType)))
+		_, _ = fmt.Fprintf(w, "event %s ignored", eventType)
 	}
 }
 
-// handlePullRequest processes pull_request events. Only the "opened" and
-// "synchronize" actions trigger the review flow (FR-02).
-func (h *Webhook) handlePullRequest(w http.ResponseWriter, r *http.Request, body []byte) {
+// handlePullRequest processes pull_request events. "opened" and
+// "synchronize" trigger the review flow (FR-02); "synchronize" and "closed"
+// additionally feed the implicit feedback tracker (v1.4 FR-40/FR-41).
+func (h *Webhook) handlePullRequest(w http.ResponseWriter, _ *http.Request, body []byte) {
 	var payload pullRequestPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
 
-	if payload.Action != "opened" && payload.Action != "synchronize" {
+	switch payload.Action {
+	case "opened", "synchronize":
+		event := PullRequestEvent{
+			Action:       payload.Action,
+			Number:       payload.Number,
+			RepoFullName: payload.Repository.FullName,
+			HeadSHA:      payload.PullRequest.Head.SHA,
+		}
+		h.logger.Sugar().Infow("pull_request event received, triggering review",
+			"action", event.Action,
+			"pr_number", event.Number,
+			"repo", event.RepoFullName,
+			"head_sha", event.HeadSHA,
+		)
+
+		// Review runs in the background: GitHub expects a fast webhook
+		// acknowledgment, and the webhook secret does not allow replay anyway.
+		if h.processor != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				defer cancel()
+				h.processor.Process(ctx, event)
+			}()
+		}
+		// v1.4: a synchronize event also advances the implicit feedback
+		// state machine (new code pushed after the review).
+		if payload.Action == "synchronize" && h.tracker != nil && payload.After != "" {
+			h.dispatchTrackOnSynchronize(payload)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(event)
+
+	case "closed":
+		// v1.4 FR-40: PR closed (merged or not) resolves the remaining
+		// pending findings as ignored_implicit.
+		h.logger.Sugar().Infow("pull_request closed, tracking implicit feedback",
+			"pr_number", payload.Number,
+			"repo", payload.Repository.FullName,
+			"merged", payload.PullRequest.Merged)
+		if h.tracker != nil {
+			h.dispatchTrackOnClosed(payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"action": payload.Action, "pr_number": payload.Number,
+			"repo": payload.Repository.FullName, "tracked": h.tracker != nil,
+		})
+
+	default:
 		h.logger.Sugar().Infow("ignored pull_request action", "action", payload.Action)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(fmt.Sprintf("pull_request action %s ignored", payload.Action)))
-		return
+		_, _ = fmt.Fprintf(w, "pull_request action %s ignored", payload.Action)
 	}
+}
 
-	event := PullRequestEvent{
-		Action:       payload.Action,
-		Number:       payload.Number,
-		RepoFullName: payload.Repository.FullName,
-		HeadSHA:      payload.PullRequest.Head.SHA,
-	}
-	h.logger.Sugar().Infow("pull_request event received, triggering review",
-		"action", event.Action,
-		"pr_number", event.Number,
-		"repo", event.RepoFullName,
-		"head_sha", event.HeadSHA,
-	)
+// dispatchTrackOnSynchronize hands a synchronize event to the tracker in
+// the background (FR-40).
+func (h *Webhook) dispatchTrackOnSynchronize(payload pullRequestPayload) {
+	tracker := h.tracker
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := tracker.TrackOnSynchronize(ctx, payload.Repository.FullName, payload.Number, payload.After, payload.Before); err != nil {
+			h.logger.Sugar().Errorw("implicit feedback tracking failed",
+				"pr_number", payload.Number, "repo", payload.Repository.FullName, "error", err)
+		}
+	}()
+}
 
-	// Review runs in the background: GitHub expects a fast webhook
-	// acknowledgment, and the webhook secret does not allow replay anyway.
-	if h.processor != nil {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-			h.processor.Process(ctx, event)
-		}()
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(event)
+// dispatchTrackOnClosed hands a closed event to the tracker in the
+// background (FR-40).
+func (h *Webhook) dispatchTrackOnClosed(payload pullRequestPayload) {
+	tracker := h.tracker
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := tracker.TrackOnClosed(ctx, payload.Repository.FullName, payload.Number, payload.PullRequest.Merged); err != nil {
+			h.logger.Sugar().Errorw("implicit feedback close tracking failed",
+				"pr_number", payload.Number, "repo", payload.Repository.FullName, "error", err)
+		}
+	}()
 }

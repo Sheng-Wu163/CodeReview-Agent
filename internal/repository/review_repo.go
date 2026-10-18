@@ -42,6 +42,10 @@ type Finding struct {
 	Message    string
 	Suggestion string
 	Confidence float64
+	// FeedbackStatus is the v1.4 implicit feedback state of the finding
+	// (FR-39): "pending", "accepted_implicit" or "ignored_implicit"
+	// ("accepted_explicit"/"rejected_explicit" are reserved).
+	FeedbackStatus string
 }
 
 // ReviewRepo implements review and finding persistence on a pgx connection
@@ -185,7 +189,7 @@ func (r *ReviewRepo) CreateFinding(ctx context.Context, f *Finding) (int64, erro
 // insertion order (FR-15 detail page).
 func (r *ReviewRepo) ListFindings(ctx context.Context, reviewID int64) ([]Finding, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, review_id, agent, severity, file_path, line_number, message, suggestion, confidence
+		SELECT id, review_id, agent, severity, file_path, line_number, message, suggestion, confidence, feedback_status
 		FROM findings
 		WHERE review_id = $1
 		ORDER BY CASE severity
@@ -203,7 +207,7 @@ func (r *ReviewRepo) ListFindings(ctx context.Context, reviewID int64) ([]Findin
 		var f Finding
 		var suggestion *string
 		if err := rows.Scan(&f.ID, &f.ReviewID, &f.Agent, &f.Severity, &f.FilePath,
-			&f.LineNumber, &f.Message, &suggestion, &f.Confidence); err != nil {
+			&f.LineNumber, &f.Message, &suggestion, &f.Confidence, &f.FeedbackStatus); err != nil {
 			return nil, fmt.Errorf("scan finding row: %w", err)
 		}
 		if suggestion != nil {

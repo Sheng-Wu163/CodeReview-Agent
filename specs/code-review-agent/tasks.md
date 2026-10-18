@@ -502,3 +502,74 @@ T10 + T11 + T12 → T13 → T14
 - **依赖**：T36
 - **预估**：2h
 - **状态**：✅ 已完成
+
+## 阶段九：v1.4 隐式反馈追踪（T39-T43）
+
+### T39: 数据库 Schema 迁移
+- **描述**：编写 SQL 迁移文件。为 `findings` 表添加 `feedback_status` (VARCHAR, 默认 'pending')。新建 `pr_commits` 表（id, repo, pr_number, sha, created_at）。更新 Repository 层的接口和实现。
+- **文件路径**：
+  - `internal/db/migrations/002_add_feedback.sql`
+  - `internal/repository/feedback_repo.go`
+  - `internal/repository/feedback_repo_test.go`
+- **完成标准**：
+  - 迁移命令成功执行。
+  - Repository 能正确插入记录和按状态查询。
+- **依赖**：T3
+- **预估**：2h
+- **状态**：✅ 已完成
+
+### T40: Webhook 事件路由扩展
+- **描述**：修改 Webhook handler。识别 `synchronize` 和 `closed` 动作，提取 `before` (旧 SHA) 和 `after` (新 SHA)，并将事件异步分发给 `FeedbackTracker` 处理。
+- **文件路径**：
+  - `internal/handler/webhook.go`
+  - `internal/handler/webhook_test.go`
+- **完成标准**：
+  - 发送带有 `synchronize` 动作的 mock webhook，触发 `FeedbackTracker.TrackOnSynchronize`。
+  - 发送带有 `closed` 且 `merged=true` 的 mock webhook，触发 `TrackOnClosed`。
+- **依赖**：T39
+- **预估**：2h
+- **状态**：✅ 已完成
+
+### T41: 隐式反馈比对引擎
+- **描述**：实现 `FeedbackTracker` 接口。
+  1. 根据旧 SHA 和新 SHA，通过 GitHub API 获取两个版本的局部代码片段。
+  2. 实现相似度比对算法（计算 Levenshtein 距离或简单的字符串替换比对）。
+  3. 根据比对结果更新 `findings` 表的状态。
+- **文件路径**：
+  - `internal/feedback/tracker.go`
+  - `internal/feedback/tracker_test.go`
+  - `internal/feedback/diff_compare.go` (纯函数比对)
+- **完成标准**：
+  - 相似度比对测试：修改了一行代码，相似度 < 80%；仅调整缩进，相似度 > 80%。
+  - 状态更新测试：正确将 `pending` 迁移到 `accepted_implicit`。
+- **依赖**：T39, T40, T13
+- **预估**：5h
+- **状态**：✅ 已完成
+
+### T42: 统计 API 与仪表盘更新
+- **描述**：
+  1. 新增 API `GET /api/metrics/feedback`，按 Agent 分类返回采纳率（Accept Rate = accepted / total_resolved）。
+  2. 修改仪表盘页面，使用简单的 HTML/CSS 展示进度条或统计卡片。
+- **文件路径**：
+  - `internal/handler/dashboard.go`
+  - `templates/dashboard.html`
+- **完成标准**：
+  - 访问 API 返回正确的 JSON 结构。
+  - 仪表盘页面能正确渲染各项 Agent 的采纳率数据。
+- **依赖**：T41
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T43: v1.4 集成测试与交付
+- **描述**：
+  1. 端到端测试：模拟完整生命周期（审查产生 finding -> synchronize 修改代码 -> closed merge），验证数据库中状态从 `pending` 变为 `accepted_implicit`。
+  2. 更新 `spec.md` 的 CHANGELOG 并标记完成。
+  3. 更新 `checklist.md`，标记 AC 通过。
+  4. 提示用户打 tag。
+- **文件路径**：
+  - `internal/integration/e2e_feedback_test.go`
+  - `specs/code-review-agent/*`
+- **完成标准**：测试通过，输出提示：“v1.4 交付完成，请执行 git tag v1.4-complete”
+- **依赖**：T42
+- **预估**：3h
+- **状态**：✅ 已完成

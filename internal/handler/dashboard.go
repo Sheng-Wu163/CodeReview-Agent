@@ -18,6 +18,7 @@ import (
 // Dashboard serves the review history web pages and the JSON API (FR-15).
 type Dashboard struct {
 	repo       *repository.ReviewRepo
+	feedback   *repository.FeedbackRepo // may be nil (v1.4 metrics off)
 	logger     *zap.Logger
 	listTmpl   *template.Template
 	detailTmpl *template.Template
@@ -27,6 +28,9 @@ type Dashboard struct {
 type listPageData struct {
 	Reviews []repository.Review
 	Counts  map[int64]int
+	// FeedbackStats feeds the v1.4 adoption-rate section (FR-43); empty
+	// when the feedback repo is not wired or no findings exist yet.
+	FeedbackStats []repository.AgentFeedbackStat
 }
 
 // detailPageData feeds templates/review_detail.html.
@@ -61,20 +65,26 @@ type apiFinding struct {
 	Confidence float64 `json:"confidence"`
 }
 
+// tmplFuncs are the helper functions available to the dashboard templates.
+var tmplFuncs = template.FuncMap{
+	// mul100 converts a [0,1] ratio to a percentage for rendering.
+	"mul100": func(v float64) float64 { return v * 100 },
+}
+
 // NewDashboard creates the dashboard handlers. templatesDir may be empty to
 // use the project-root "templates" directory.
 func NewDashboard(repo *repository.ReviewRepo, logger *zap.Logger, templatesDir string) (*Dashboard, error) {
 	if templatesDir == "" {
 		templatesDir = "templates"
 	}
-	listTmpl, err := template.ParseFiles(
+	listTmpl, err := template.New("").Funcs(tmplFuncs).ParseFiles(
 		filepath.Join(templatesDir, "layout.html"),
 		filepath.Join(templatesDir, "dashboard.html"),
 	)
 	if err != nil {
 		return nil, err
 	}
-	detailTmpl, err := template.ParseFiles(
+	detailTmpl, err := template.New("").Funcs(tmplFuncs).ParseFiles(
 		filepath.Join(templatesDir, "layout.html"),
 		filepath.Join(templatesDir, "review_detail.html"),
 	)
@@ -84,12 +94,50 @@ func NewDashboard(repo *repository.ReviewRepo, logger *zap.Logger, templatesDir 
 	return &Dashboard{repo: repo, logger: logger, listTmpl: listTmpl, detailTmpl: detailTmpl}, nil
 }
 
+// SetFeedbackRepo wires the v1.4 implicit-feedback repository, enabling the
+// adoption-rate metrics (FR-43). Optional.
+func (d *Dashboard) SetFeedbackRepo(fb *repository.FeedbackRepo) {
+	d.feedback = fb
+}
+
 // Register mounts the dashboard pages and JSON API routes on r.
 func (d *Dashboard) Register(r chi.Router) {
 	r.Get("/dashboard", d.handleList)
 	r.Get("/dashboard/reviews/{id}", d.handleDetail)
 	r.Get("/api/reviews", d.handleAPIList)
 	r.Get("/api/reviews/{id}", d.handleAPIDetail)
+	r.Get("/api/metrics/feedback", d.handleAPIMetricsFeedback)
+}
+
+// handleAPIMetricsFeedback serves GET /api/metrics/feedback (v1.4 FR-43):
+// the per-agent adoption statistics (accept rate over resolved findings).
+func (d *Dashboard) handleAPIMetricsFeedback(w http.ResponseWriter, r *http.Request) {
+	if d.feedback == nil {
+		http.Error(w, "feedback metrics not enabled", http.StatusNotImplemented)
+		return
+	}
+	stats, err := d.feedback.FeedbackStats(r.Context())
+	if err != nil {
+		d.logger.Sugar().Errorw("api feedback stats", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	type agentMetric struct {
+		Agent      string  `json:"agent"`
+		Total      int     `json:"total"`
+		Accepted   int     `json:"accepted"`
+		Ignored    int     `json:"ignored"`
+		Pending    int     `json:"pending"`
+		AcceptRate float64 `json:"accept_rate"`
+	}
+	out := make([]agentMetric, 0, len(stats))
+	for _, s := range stats {
+		out = append(out, agentMetric{
+			Agent: s.Agent, Total: s.Total, Accepted: s.Accepted,
+			Ignored: s.Ignored, Pending: s.Pending, AcceptRate: s.AcceptRate,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": out})
 }
 
 // handleList renders GET /dashboard (AC-19).
@@ -110,7 +158,17 @@ func (d *Dashboard) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 		counts[rev.ID] = len(findings)
 	}
-	if err := d.listTmpl.ExecuteTemplate(w, "layout.html", listPageData{Reviews: reviews, Counts: counts}); err != nil {
+	var stats []repository.AgentFeedbackStat
+	if d.feedback != nil {
+		if stats, err = d.feedback.FeedbackStats(r.Context()); err != nil {
+			d.logger.Sugar().Errorw("feedback stats", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := d.listTmpl.ExecuteTemplate(w, "layout.html", listPageData{
+		Reviews: reviews, Counts: counts, FeedbackStats: stats,
+	}); err != nil {
 		d.logger.Sugar().Errorw("render dashboard", "error", err)
 	}
 }

@@ -1,4 +1,28 @@
 {{define "content"}}
+{{if .FeedbackStats}}
+<h2>Agent 发现采纳率</h2>
+<p class="muted">Accept Rate = accepted / resolved（accepted_implicit + ignored_implicit），v1.4 隐式反馈。</p>
+<table>
+  <thead>
+    <tr><th>Agent</th><th>Findings</th><th>Accepted</th><th>Ignored</th><th>Pending</th><th>采纳率</th></tr>
+  </thead>
+  <tbody>
+    {{range .FeedbackStats}}
+    <tr>
+      <td>{{.Agent}}</td>
+      <td>{{.Total}}</td>
+      <td>{{.Accepted}}</td>
+      <td>{{.Ignored}}</td>
+      <td>{{.Pending}}</td>
+      <td>
+        <div class="bar"><div class="bar-fill" style="width: {{printf "%.0f" (mul100 .AcceptRate)}}%;"></div></div>
+        <span class="muted">{{printf "%.0f%%" (mul100 .AcceptRate)}}</span>
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
 <p class="muted">Review history, newest first. Click an ID for details.</p>
 <table>
   <thead>
