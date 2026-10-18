@@ -559,3 +559,85 @@ type EvalReport struct {
 - FIXED: 剥离 ReAct 模板注入的 `stop` 序列——推理模型在隐藏推理中回显 "Observation:" 被截断导致 content 为空（agent 报 "unable to parse agent output"）
 - FIXED: 提高 completion token 预算（4096→16384），避免推理 token 挤占最终内容
 - FIXED: `read_file` 容忍 LLM 传参带引号（`"db.go"`）
+
+## 14. v1.2 自适应审查（策略开关）
+
+### 14.1 Why
+
+随着 v1.3（静态分析）和 v1.1（上下文注入）的引入，系统的审查能力显著增强，但也暴露出“一刀切”策略的工程问题：
+1. **小 PR 过度审查**：修改 5 行代码的 Trivial PR，依然走 4 个 Agent + 验证 Agent 的完整流程，浪费大量 Token 和等待时间。
+2. **大 PR 审查不足**：涉及核心模块的 Complex PR，需要验证 Agent 更加严格地把关。
+
+**对抗性审查的修正结论**：v1.2 **只做“Agent 组合的开关”**，不做任何参数级的动态调优（如动态修改 `max_iterations`、温度、Prompt 变体）。因为参数调优会导致同一个 PR 两次审查的结果完全不可复现，这是从 Demo 走向生产环境的致命缺陷。
+
+### 14.2 Requirements
+
+**FR-34: 复杂度评估器（ComplexityAssessor）**
+系统必须实现一个基于 Diff 统计特征的评估器，将 PR 分为三个等级：
+- `Trivial`：变更总行数 < 20 行，且只涉及 1 个文件，且不涉及敏感目录/核心模块。
+- `Complex`：变更总行数 > 200 行，或涉及 > 5 个文件，或触碰了配置文件中的 `sensitive_paths`（如 `internal/auth/`、`migrations/`）。
+- `Standard`：介于两者之间的所有情况。
+
+**FR-35: 策略选择器（StrategySelector）**
+系统必须根据复杂度等级选择审查策略：
+- `Trivial`：仅启用 `SecurityAgent` 和 `LintAgent`，**跳过** `LogicAgent`、`PerformanceAgent` 和 `VerifierAgent`。
+- `Standard`：启用全部 4 个审查 Agent + 1 个 `VerifierAgent`（当前默认策略）。
+- `Complex`：启用全部 4 个审查 Agent + 1 个 `VerifierAgent`（强制开启验证）。
+
+**FR-36: 可复现性保证**
+系统必须保证，**只要 PR 的 Diff 内容相同，复杂度评估的结果就必须完全一致**。评估器不得依赖 LLM 进行复杂度判定，必须使用确定性的代码统计逻辑。
+
+**FR-37: 编排器集成**
+`Orchestrator` 必须在执行审查前调用评估器，获取 `ComplexityLevel`，然后按需启动相应的 Agent。如果跳过了某个 Agent，必须在数据库中记录该 Agent 的状态为 `"skipped_by_strategy"`。
+
+**FR-38: 配置化**
+复杂度判定的阈值（20 行、200 行、敏感路径列表）必须支持通过 `configs/config.yaml` 配置，但不允许在运行时动态修改。
+
+### 14.3 Interface Freeze Declaration
+
+```go
+// ComplexityLevel 定义了 PR 的复杂度
+type ComplexityLevel string
+
+const (
+	ComplexityTrivial  ComplexityLevel = "trivial"
+	ComplexityStandard ComplexityLevel = "standard"
+	ComplexityComplex  ComplexityLevel = "complex"
+)
+
+// ReviewStrategy 定义了当前 PR 需要执行的审查策略
+type ReviewStrategy struct {
+	Level          ComplexityLevel
+	EnabledAgents  []string // 例如 ["security", "lint"]
+	EnableVerifier bool
+}
+
+// ComplexityAssessor 负责评估 PR 复杂度
+type ComplexityAssessor interface {
+	Assess(diffs []diff.FileDiff) ComplexityLevel
+}
+
+// StrategySelector 负责根据复杂度选择策略
+type StrategySelector interface {
+	Select(level ComplexityLevel) ReviewStrategy
+}
+```
+
+### 14.4 Edge Cases
+
+| 场景 | 期望行为 |
+|------|---------|
+| Diff 为空或全部被过滤 | 判定为 `Trivial`，直接提交 "LGTM ✅" 并结束 |
+| 涉及敏感路径，但只改了 1 行注释 | 判定为 `Complex`（安全优先原则，宁可错杀不可放过） |
+| 配置文件未定义 `sensitive_paths` | 使用代码内置的默认敏感路径（如 `auth`, `migration`） |
+
+## CHANGELOG
+
+### v1.2 (2026-10-18) — tag: v1.2-complete
+- ADDED: 基于确定性统计的复杂度评估器（`internal/review/assessor.go`，无 LLM/无网络，FR-34/FR-36）
+- ADDED: Agent 组合的开关式策略选择（Trivial 仅 security+lint 且跳过 Verifier，FR-35）
+- ADDED: 敏感路径配置（`static_analysis.adaptive.sensitive_paths`，空则用内置默认，FR-38）
+- ADDED: 阈值配置化（`trivial_max_lines`/`complex_min_lines`/`complex_min_files`，FR-38）
+- MODIFIED: Orchestrator 按策略执行 Agent，被跳过的 Agent 记录为 `skipped_by_strategy`（FR-37）
+- MODIFIED: `reviews` 表新增 `agent_status`（JSONB，migration 003）持久化各 Agent 状态（AC-77）
+- FIXED: golangci-lint 单实例锁增加进程内互斥（修复 pipeline 多 worker 并发自锁）+ 跨进程退避重试

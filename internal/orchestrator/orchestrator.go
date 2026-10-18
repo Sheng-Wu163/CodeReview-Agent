@@ -22,6 +22,7 @@ import (
 	"codereviewagent/internal/config"
 	ctxcontext "codereviewagent/internal/context"
 	"codereviewagent/internal/diff"
+	"codereviewagent/internal/review"
 )
 
 // duplicateWindow is the time window in which a repeated webhook for the
@@ -78,6 +79,18 @@ type ContextBuilder interface {
 // ContextBuilderFactory creates a ContextBuilder bound to a workspace root.
 type ContextBuilderFactory func(root string) ContextBuilder
 
+// ComplexityAssessor assesses a PR's complexity (v1.2 FR-34);
+// review.Assessor implements it. Defined in the consumer per convention.
+type ComplexityAssessor interface {
+	Assess(diffs []diff.FileDiff) review.ComplexityLevel
+}
+
+// StrategySelector selects the review strategy for a complexity level
+// (v1.2 FR-35); review.Selector implements it.
+type StrategySelector interface {
+	Select(level review.ComplexityLevel) review.ReviewStrategy
+}
+
 // Result carries everything the caller needs after one review run.
 type Result struct {
 	// Input echoes the review request.
@@ -95,6 +108,12 @@ type Result struct {
 	// AgentErrors records per-agent failures (FR-09 / NFR-02: an agent
 	// failure must not fail the whole review).
 	AgentErrors map[string]string
+	// ComplexityLevel is the deterministic complexity assessed for this PR
+	// (v1.2 FR-34).
+	ComplexityLevel review.ComplexityLevel
+	// AgentStatus maps every configured agent to its outcome: "executed",
+	// "skipped_by_strategy" (v1.2 FR-37) or "failed".
+	AgentStatus map[string]string
 	// NoMeaningfulChanges is true when the diff contained no code changes
 	// (spec edge case: comment-only or whitespace-only diffs).
 	NoMeaningfulChanges bool
@@ -114,6 +133,10 @@ type Orchestrator struct {
 	// contextFactory creates the local-context builder for a workspace root
 	// (v1.1 FR-25). May be nil to skip context injection.
 	contextFactory ContextBuilderFactory
+	// assessor and selector implement the v1.2 adaptive review strategy
+	// (FR-34/FR-35). They never call an LLM.
+	assessor ComplexityAssessor
+	selector StrategySelector
 	// staticCfg is the static analysis configuration applied by
 	// analysisFactory (set via SetAnalysisConfig).
 	staticCfg config.StaticAnalysisConfig
@@ -149,7 +172,45 @@ func New(logger *zap.Logger, root string, reviewAgents []agents.ReviewAgent, ver
 	o.contextFactory = func(wsRoot string) ContextBuilder {
 		return ctxcontext.NewBuilder(wsRoot, logger)
 	}
+	o.assessor = review.NewAssessor(review.AssessorOptions{})
+	o.selector = review.NewSelector()
 	return o
+}
+
+// SetReviewStrategy overrides the adaptive review strategy components
+// (v1.2). Production wires config-driven thresholds; tests inject mocks.
+func (o *Orchestrator) SetReviewStrategy(assessor ComplexityAssessor, selector StrategySelector) {
+	if assessor != nil {
+		o.assessor = assessor
+	}
+	if selector != nil {
+		o.selector = selector
+	}
+}
+
+// selectStrategy assesses the diffs and selects the review strategy,
+// falling back to the deterministic defaults.
+func (o *Orchestrator) selectStrategy(diffs []diff.FileDiff) review.ReviewStrategy {
+	assessor := o.assessor
+	if assessor == nil {
+		assessor = review.NewAssessor(review.AssessorOptions{})
+	}
+	selector := o.selector
+	if selector == nil {
+		selector = review.NewSelector()
+	}
+	return selector.Select(assessor.Assess(diffs))
+}
+
+// acceptAsVerified converts raw agent findings into verified findings with
+// full confidence, without any LLM verification (FR-35,
+// CLAUDE.v.1.2.md: verifier-skip semantics).
+func acceptAsVerified(findings []agents.AgentFinding) []agents.VerifiedFinding {
+	out := make([]agents.VerifiedFinding, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, agents.VerifiedFinding{AgentFinding: f, Confidence: 1.0})
+	}
+	return out
 }
 
 // SetContextBuilderFactory overrides the local-context builder factory
@@ -203,6 +264,25 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		}
 		reviewable = append(reviewable, f)
 	}
+
+	// Step 3.4: adaptive review strategy (v1.2 FR-34..FR-38). A fully
+	// deterministic complexity assessment on the filtered diff selects
+	// which agents run, before any agent or LLM is invoked. An empty or
+	// fully filtered diff assesses as Trivial (spec 14.4).
+	strategy := o.selectStrategy(reviewable)
+	res.ComplexityLevel = strategy.Level
+	res.AgentStatus = make(map[string]string, len(o.agents))
+	for _, a := range o.agents {
+		if review.IsAgentEnabled(strategy, a.Name()) {
+			res.AgentStatus[a.Name()] = "executed"
+		} else {
+			res.AgentStatus[a.Name()] = "skipped_by_strategy"
+		}
+	}
+	o.logger.Sugar().Infow("review strategy selected",
+		"level", strategy.Level,
+		"agents", strategy.EnabledAgents,
+		"verifier", strategy.EnableVerifier)
 
 	// Meaningful-change gate: comment-only diffs skip the whole review.
 	hasChanges := false
@@ -290,6 +370,11 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 	g := new(errgroup.Group)
 	for _, a := range o.agents {
 		agent := a
+		if !review.IsAgentEnabled(strategy, agent.Name()) {
+			o.logger.Sugar().Infow("review agent skipped by strategy",
+				"agent", agent.Name(), "level", strategy.Level)
+			continue
+		}
 		g.Go(func() error {
 			agentStart := time.Now()
 			fnd, err := o.runAgent(ctx, agent, agentInput)
@@ -297,6 +382,7 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 			defer mu.Unlock()
 			if err != nil {
 				res.AgentErrors[agent.Name()] = err.Error()
+				res.AgentStatus[agent.Name()] = "failed"
 				o.logger.Sugar().Errorw("review agent failed",
 					"agent", agent.Name(), "error", err,
 					"elapsed", time.Since(agentStart))
@@ -314,18 +400,27 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		return nil, fmt.Errorf("agent group: %w", err)
 	}
 
-	// Step 6: adversarial verification (FR-10). The verifier is built per
-	// run because its read_file tool is bound to this run's workspace.
-	var verifier Verifier
-	if o.verifierFactor != nil {
-		verifier = o.verifierFactor(root)
-	}
-	if verifier != nil && len(rawFindings) > 0 {
-		verified, err := verifier.Verify(ctx, rawFindings, agentInput)
-		if err != nil {
-			return nil, fmt.Errorf("verify findings: %w", err)
+	// Step 6: adversarial verification (FR-10). Trivial PRs skip the
+	// verifier entirely: the raw findings are accepted with full confidence
+	// and no LLM call (FR-35, CLAUDE.v.1.2.md). Otherwise the verifier is
+	// built per run because its read_file tool is bound to this run's
+	// workspace.
+	switch {
+	case !strategy.EnableVerifier:
+		res.Findings = acceptAsVerified(rawFindings)
+		o.logger.Sugar().Infow("verifier skipped by strategy", "level", strategy.Level)
+	default:
+		var verifier Verifier
+		if o.verifierFactor != nil {
+			verifier = o.verifierFactor(root)
 		}
-		res.Findings = verified
+		if verifier != nil && len(rawFindings) > 0 {
+			verified, err := verifier.Verify(ctx, rawFindings, agentInput)
+			if err != nil {
+				return nil, fmt.Errorf("verify findings: %w", err)
+			}
+			res.Findings = verified
+		}
 	}
 
 	// Step 7: severity + confidence ordering (FR-12, FR-13).

@@ -31,6 +31,9 @@ type ReviewStore interface {
 	// UpdateReviewPreFindings persists the serialized static-analysis
 	// preFindings JSON (v1.3 FR-24 / AC-43).
 	UpdateReviewPreFindings(ctx context.Context, id int64, preFindings string) error
+	// UpdateReviewAgentStatus persists the per-agent outcome map of the
+	// adaptive strategy (v1.2 FR-37 / AC-77).
+	UpdateReviewAgentStatus(ctx context.Context, id int64, status map[string]string) error
 	CreateFinding(ctx context.Context, f *repository.Finding) (int64, error)
 }
 
@@ -125,6 +128,14 @@ func (p *Pipeline) Process(ctx context.Context, ev EventInput) {
 			log.Errorw("marshal preFindings", "error", err)
 		} else if err := p.store.UpdateReviewPreFindings(ctx, reviewID, preJSON); err != nil {
 			log.Errorw("persist preFindings", "error", err)
+		}
+	}
+
+	// Persist the adaptive-strategy agent outcomes, including the
+	// "skipped_by_strategy" marks (v1.2 FR-37 / AC-77).
+	if len(res.AgentStatus) > 0 {
+		if err := p.store.UpdateReviewAgentStatus(ctx, reviewID, res.AgentStatus); err != nil {
+			log.Errorw("persist agent status", "error", err)
 		}
 	}
 

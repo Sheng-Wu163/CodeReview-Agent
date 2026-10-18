@@ -208,3 +208,43 @@
 - [x] 所有 AC-62 ~ AC-69 通过（AC-68 受环境限制，见上文说明）
 - [x] `spec.md` 的 CHANGELOG 已更新
 - [ ] git tag `v1.6-complete` 已打 ← 由用户人工执行
+
+## v1.2 自适应审查策略验收
+
+### 评估器验收
+
+- [x] AC-70: Given 变更 10 行单文件，When Assessor 运行, Then 返回 `Trivial`
+  - ✅ `internal/review/assessor_test.go` TestAssessorLevels（表驱动）
+- [x] AC-71: Given 变更 250 行，When Assessor 运行, Then 返回 `Complex`
+  - ✅ 同测试 "250 lines => Complex"
+- [x] AC-72: Given 变更触碰 `internal/auth/` 目录，When Assessor 运行, Then 返回 `Complex`（无视行数）
+  - ✅ 同测试 "auth/login.go / internal/auth/login.go => Complex"；`oauth/` 不误报（段匹配）
+- [x] AC-73: Given 相同的 Diff 输入，When 连续运行 Assessor 100 次, Then 100 次结果完全一致（确定性）
+  - ✅ TestAssessorDeterministic（纯统计，无 LLM/无网络，CLAUDE.v.1.2.md）
+
+### 策略执行验收
+
+- [x] AC-74: Given PR 复杂度为 `Trivial`, When Orchestrator 运行, Then 仅执行 `security` 和 `lint` Agent，跳过 `logic`、`performance` 和 `verifier`
+  - ✅ `orchestrator_test.go` TestOrchestratorTrivialStrategySkipsAgents + e2e TestE2EStrategySwitching/trivial（真实 Assessor+数据集样本）
+- [x] AC-75: Given PR 复杂度为 `Standard`, When Orchestrator 运行, Then 执行全部 4 个 Agent 和 `verifier`
+  - ✅ TestOrchestratorStandardStrategyRunsAll
+- [x] AC-76: Given PR 复杂度为 `Complex`, When Orchestrator 运行, Then 执行全部 4 个 Agent 和 `verifier`
+  - ✅ TestOrchestratorComplexStrategyRunsAll + e2e TestE2EStrategySwitching/complex（300 行样本）
+- [x] AC-77: Given 跳过了 Verifier 的 Trivial PR, When 检查数据库记录, Then 被跳过的 Agent 状态记录为 `skipped_by_strategy`
+  - ✅ migration `003_add_agent_status.sql`（JSONB）+ `UpdateReviewAgentStatus` + pipeline 持久化 + `review_repo_test.go` TestUpdateReviewAgentStatus
+
+### 代码质量验收
+
+- [x] AC-78: 执行 `golangci-lint run ./...` 无 error 级别问题
+  - ✅ `internal/review/` 0 issues（历史 warning 级风格问题不计）
+- [ ] AC-79: 执行 `go test ./... -race` 全部通过
+  - ⚠️ 本机无 gcc（`-race` 依赖 cgo），无法执行；已执行 `go test ./...` 全量通过。请在具备 gcc 的环境补充执行
+- [x] AC-80: `internal/review/` 下所有导出函数和类型均有文档注释
+  - ✅ 全部导出符号带 doc comment
+
+## 迭代交付清单
+
+- [x] git tag `v1.2-start` 已打
+- [x] 所有 AC-70 ~ AC-80 通过（AC-79 受环境限制，见上文说明）
+- [x] `spec.md` 的 CHANGELOG 已更新
+- [ ] git tag `v1.2-complete` 已打 ← 由用户人工执行

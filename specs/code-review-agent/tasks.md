@@ -445,3 +445,60 @@ T10 + T11 + T12 → T13 → T14
 - **依赖**：T32
 - **预估**：1h
 - **状态**：✅ 已完成
+
+## 阶段八：v1.2 自适应审查策略（T34-T38）
+
+### T34: 复杂度评估器实现
+- **描述**：实现 `ComplexityAssessor` 接口。基于 `diff.FileDiff` 统计变更行数和文件数。读取配置中的 `sensitive_paths` 进行路径前缀匹配。
+- **文件路径**：
+  - `internal/review/assessor.go`
+  - `internal/review/assessor_test.go`
+  - `internal/config/config.go`（新增 adaptive 配置段）
+- **完成标准**：
+  - 10 行变更单文件，不涉及敏感路径 -> 返回 `Trivial`
+  - 250 行变更 -> 返回 `Complex`
+  - 修改 `auth/login.go` 第 1 行 -> 返回 `Complex`
+  - 单元测试使用表驱动测试（table-driven tests）
+- **依赖**：T1, T4
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T35: 策略选择器实现
+- **描述**：实现 `StrategySelector`。根据 `ComplexityLevel` 返回预定义的 `ReviewStrategy`（包含启用的 Agent 名称列表和是否启用 Verifier）。
+- **文件路径**：
+  - `internal/review/strategy.go`
+  - `internal/review/strategy_test.go`
+- **完成标准**：
+  - Trivial 返回 `["security", "lint"]` 且 `EnableVerifier=false`
+  - Standard/Complex 返回 4 个 Agent 且 `EnableVerifier=true`
+- **依赖**：T34
+- **预估**：2h
+- **状态**：⬜ 未开始
+
+### T36: Orchestrator 策略集成
+- **描述**：修改 `orchestrator.go`。在 Diff 解析后，调用 Assessor 和 Selector。根据 `Strategy.EnabledAgents` 动态启动 goroutine。如果 `EnableVerifier=false`，直接跳过验证阶段，将原始 finding 标记为验证通过。
+- **文件路径**：
+  - `internal/orchestrator/orchestrator.go`
+  - `internal/orchestrator/orchestrator_test.go`
+  - `internal/repository/review_repo.go`（更新 schema 记录 skipped agent）
+- **完成标准**：
+  - Mock Assessor 返回 Trivial 时，只调用 2 个 Agent，不调用 Verifier
+  - Mock Assessor 返回 Standard 时，调用 4 个 Agent 和 Verifier
+- **依赖**：T35
+- **预估**：4h
+- **状态**：✅ 已完成
+
+### T37: v1.2 集成测试与交付
+- **描述**：
+  1. 编写端到端测试：分别在 `eval/dataset/` 下构造一个 Trivial PR 和一个 Complex PR，验证策略开关生效。
+  2. 更新 `spec.md` 的 CHANGELOG。
+  3. 更新 `checklist.md`，标记 AC 通过。
+  4. 提示用户打 tag。
+- **文件路径**：
+  - `eval/dataset/sample-trivial/*`
+  - `eval/dataset/sample-complex/*`
+  - `specs/code-review-agent/*`
+- **完成标准**：测试通过，输出提示：“v1.2 交付完成，请执行 git tag v1.2-complete”
+- **依赖**：T36
+- **预估**：2h
+- **状态**：✅ 已完成

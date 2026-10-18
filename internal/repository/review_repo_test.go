@@ -2,8 +2,10 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -321,8 +323,59 @@ func TestUpdateReviewPreFindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetReview: %v", err)
 	}
-	if got.PreFindings != preJSON {
-		t.Errorf("PreFindings = %q, want %q", got.PreFindings, preJSON)
+	// PostgreSQL jsonb normalizes the document (key order/whitespace), so
+	// compare semantically rather than as raw strings.
+	var gotDoc, wantDoc any
+	if err := json.Unmarshal([]byte(got.PreFindings), &gotDoc); err != nil {
+		t.Fatalf("unmarshal stored preFindings %q: %v", got.PreFindings, err)
+	}
+	if err := json.Unmarshal([]byte(preJSON), &wantDoc); err != nil {
+		t.Fatalf("unmarshal expected preFindings: %v", err)
+	}
+	if !reflect.DeepEqual(gotDoc, wantDoc) {
+		t.Errorf("PreFindings = %q, want equivalent to %q", got.PreFindings, preJSON)
+	}
+}
+
+// TestUpdateReviewAgentStatus covers the v1.2 AC-77 persistence: the
+// per-agent outcome map (including "skipped_by_strategy") must round-trip
+// through the reviews table.
+func TestUpdateReviewAgentStatus(t *testing.T) {
+	repo, cleanup := newTestRepo(t)
+	defer cleanup()
+	ctx := context.Background()
+	truncateReviews(t, repo)
+
+	id, err := repo.CreateReview(ctx, &Review{
+		RepoFullName: "p/q", PRNumber: 4, HeadSHA: "sha-4", Status: "pending",
+	})
+	if err != nil {
+		t.Fatalf("CreateReview: %v", err)
+	}
+
+	status := map[string]string{
+		"security":    "executed",
+		"lint":        "executed",
+		"logic":       "skipped_by_strategy",
+		"performance": "skipped_by_strategy",
+	}
+	if err := repo.UpdateReviewAgentStatus(ctx, id, status); err != nil {
+		t.Fatalf("UpdateReviewAgentStatus: %v", err)
+	}
+
+	got, err := repo.GetReview(ctx, id)
+	if err != nil {
+		t.Fatalf("GetReview: %v", err)
+	}
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(got.AgentStatus), &parsed); err != nil {
+		t.Fatalf("unmarshal AgentStatus %q: %v", got.AgentStatus, err)
+	}
+	if parsed["logic"] != "skipped_by_strategy" {
+		t.Errorf("agent_status[logic] = %q, want skipped_by_strategy", parsed["logic"])
+	}
+	if parsed["security"] != "executed" {
+		t.Errorf("agent_status[security] = %q, want executed", parsed["security"])
 	}
 }
 

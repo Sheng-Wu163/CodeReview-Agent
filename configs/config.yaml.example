@@ -42,3 +42,11 @@ static_analysis:
       #   description: Internal service token
       #   pattern: "int_tk_[A-Za-z0-9]{16,}"
       #   keywords: ["int_tk_"]
+  # v1.2 adaptive review strategy: deterministic complexity thresholds
+  # (FR-34/FR-38). Empty sensitive_paths falls back to built-in defaults
+  # (auth, migration, migrations).
+  adaptive:
+    trivial_max_lines: 20       # < this many changed lines + <= 1 file => Trivial
+    complex_min_lines: 200      # > this many changed lines => Complex
+    complex_min_files: 5        # > this many files => Complex
+    sensitive_paths: []         # e.g. ["internal/auth", "migrations"]

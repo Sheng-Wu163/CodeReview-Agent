@@ -17,6 +17,7 @@ import (
 	itools "codereviewagent/internal/ai/tools"
 	ctxcontext "codereviewagent/internal/context"
 	"codereviewagent/internal/diff"
+	"codereviewagent/internal/review"
 )
 
 // nopLogger returns a discard logger for tests.
@@ -101,8 +102,17 @@ func newTestOrchestrator(t *testing.T, reviewAgents []agents.ReviewAgent, v Veri
 	if v != nil {
 		factory = func(string) Verifier { return v }
 	}
-	return New(nopLogger(t), root, reviewAgents, factory, diff.NewFilter(diff.DefaultFilterRules()))
+	o := New(nopLogger(t), root, reviewAgents, factory, diff.NewFilter(diff.DefaultFilterRules()))
+	// Pin the Standard strategy so the pre-v1.2 pipeline tests exercise the
+	// full 4-agent + verifier flow regardless of diff size.
+	o.SetReviewStrategy(fixedAssessor{level: review.ComplexityStandard}, review.NewSelector())
+	return o
 }
+
+// fixedAssessor returns a constant complexity level (v1.2 tests).
+type fixedAssessor struct{ level review.ComplexityLevel }
+
+func (f fixedAssessor) Assess(_ []diff.FileDiff) review.ComplexityLevel { return f.level }
 
 func TestOrchestratorFullPipeline(t *testing.T) {
 	sec := &mockAgent{name: "security", findings: []agents.AgentFinding{finding("security", "critical", "SQL injection")}}
@@ -392,5 +402,122 @@ func TestOrchestratorInjectsLocalContext(t *testing.T) {
 	}
 	if got.Changes[0].ChangeType != ctxcontext.SignatureChanged {
 		t.Errorf("change type = %q", got.Changes[0].ChangeType)
+	}
+}
+
+// fourAgents builds one mock agent per review role.
+func fourAgents() ([]agents.ReviewAgent, map[string]*mockAgent) {
+	m := map[string]*mockAgent{
+		"security":    {name: "security", findings: []agents.AgentFinding{finding("security", "critical", "SQL injection")}},
+		"logic":       {name: "logic", findings: []agents.AgentFinding{finding("logic", "warning", "unhandled error")}},
+		"performance": {name: "performance"},
+		"lint":        {name: "lint"},
+	}
+	return []agents.ReviewAgent{m["security"], m["logic"], m["performance"], m["lint"]}, m
+}
+
+// TestOrchestratorTrivialStrategySkipsAgents verifies AC-74: a Trivial PR
+// runs only the security and lint agents and never invokes the verifier.
+func TestOrchestratorTrivialStrategySkipsAgents(t *testing.T) {
+	agts, byName := fourAgents()
+	verifier := &mockVerifier{verified: []agents.VerifiedFinding{
+		{AgentFinding: finding("security", "critical", "SQL injection"), Confidence: 0.95},
+	}}
+	o := newTestOrchestrator(t, agts, verifier)
+	o.SetReviewStrategy(fixedAssessor{level: review.ComplexityTrivial}, review.NewSelector())
+
+	res, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 1, HeadSHA: "trivial-sha", DiffText: reviewDiff(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if res.ComplexityLevel != review.ComplexityTrivial {
+		t.Errorf("ComplexityLevel = %q, want trivial", res.ComplexityLevel)
+	}
+	if byName["security"].callCount() != 1 || byName["lint"].callCount() != 1 {
+		t.Errorf("security/lint calls = %d/%d, want 1/1",
+			byName["security"].callCount(), byName["lint"].callCount())
+	}
+	if byName["logic"].callCount() != 0 || byName["performance"].callCount() != 0 {
+		t.Errorf("logic/performance must be skipped, got %d/%d calls",
+			byName["logic"].callCount(), byName["performance"].callCount())
+	}
+	if verifier.calls != 0 {
+		t.Errorf("verifier must be skipped for Trivial, got %d calls", verifier.calls)
+	}
+	// Skipped agents are recorded (AC-77) and findings are accepted with
+	// full confidence without LLM verification.
+	if res.AgentStatus["logic"] != "skipped_by_strategy" || res.AgentStatus["performance"] != "skipped_by_strategy" {
+		t.Errorf("AgentStatus = %v, want logic/performance skipped_by_strategy", res.AgentStatus)
+	}
+	if res.AgentStatus["security"] != "executed" || res.AgentStatus["lint"] != "executed" {
+		t.Errorf("AgentStatus = %v, want security/lint executed", res.AgentStatus)
+	}
+	if len(res.Findings) == 0 {
+		t.Fatal("expected the raw findings to be accepted as verified")
+	}
+	for _, f := range res.Findings {
+		if f.Confidence != 1.0 {
+			t.Errorf("skipped verifier must set confidence 1.0, got %v", f.Confidence)
+		}
+	}
+}
+
+// TestOrchestratorStandardStrategyRunsAll verifies AC-75: a Standard PR runs
+// all four agents and the verifier.
+func TestOrchestratorStandardStrategyRunsAll(t *testing.T) {
+	agts, byName := fourAgents()
+	verifier := &mockVerifier{verified: []agents.VerifiedFinding{
+		{AgentFinding: finding("security", "critical", "SQL injection"), Confidence: 0.9},
+	}}
+	o := newTestOrchestrator(t, agts, verifier)
+	o.SetReviewStrategy(fixedAssessor{level: review.ComplexityStandard}, review.NewSelector())
+
+	res, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 2, HeadSHA: "standard-sha", DiffText: reviewDiff(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for name, a := range byName {
+		if a.callCount() != 1 {
+			t.Errorf("agent %s calls = %d, want 1", name, a.callCount())
+		}
+		if res.AgentStatus[name] != "executed" {
+			t.Errorf("AgentStatus[%s] = %q, want executed", name, res.AgentStatus[name])
+		}
+	}
+	if verifier.calls != 1 {
+		t.Errorf("verifier calls = %d, want 1", verifier.calls)
+	}
+}
+
+// TestOrchestratorComplexStrategyRunsAll verifies AC-76.
+func TestOrchestratorComplexStrategyRunsAll(t *testing.T) {
+	agts, byName := fourAgents()
+	verifier := &mockVerifier{}
+	o := newTestOrchestrator(t, agts, verifier)
+	o.SetReviewStrategy(fixedAssessor{level: review.ComplexityComplex}, review.NewSelector())
+
+	res, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 3, HeadSHA: "complex-sha", DiffText: reviewDiff(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for name, a := range byName {
+		if a.callCount() != 1 {
+			t.Errorf("agent %s calls = %d, want 1", name, a.callCount())
+		}
+	}
+	if verifier.calls != 1 {
+		t.Errorf("verifier calls = %d, want 1", verifier.calls)
+	}
+	if res.ComplexityLevel != review.ComplexityComplex {
+		t.Errorf("ComplexityLevel = %q, want complex", res.ComplexityLevel)
 	}
 }

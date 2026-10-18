@@ -24,6 +24,7 @@ import (
 	"codereviewagent/internal/config"
 	"codereviewagent/internal/eval"
 	"codereviewagent/internal/orchestrator"
+	"codereviewagent/internal/review"
 )
 
 // perSampleTimeout bounds one full review run (the orchestrator applies its
@@ -107,6 +108,12 @@ func run() error {
 			return agents.NewVerifier(tools.ReadFileTool{Root: root}, nil)
 		}, nil)
 	orch.SetAnalysisConfig(cfg.StaticAnalysis)
+	orch.SetReviewStrategy(review.NewAssessor(review.AssessorOptions{
+		TrivialMaxLines: cfg.StaticAnalysis.Adaptive.TrivialMaxLines,
+		ComplexMinLines: cfg.StaticAnalysis.Adaptive.ComplexMinLines,
+		ComplexMinFiles: cfg.StaticAnalysis.Adaptive.ComplexMinFiles,
+		SensitivePaths:  cfg.StaticAnalysis.Adaptive.SensitivePaths,
+	}), review.NewSelector())
 
 	evaluator := &eval.Evaluator{
 		Runner: orchestratorRunner{orch: orch},

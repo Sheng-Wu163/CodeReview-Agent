@@ -21,8 +21,10 @@ import (
 	"codereviewagent/internal/ai/agents"
 	"codereviewagent/internal/analysis"
 	"codereviewagent/internal/config"
+	ctxcontext "codereviewagent/internal/context"
 	"codereviewagent/internal/diff"
 	"codereviewagent/internal/orchestrator"
+	"codereviewagent/internal/review"
 )
 
 // e2eFixtureModule creates a Go module containing one file per problem
@@ -337,6 +339,13 @@ func TestE2EContextInjectionOnSignatureChange(t *testing.T) {
 		func(string) orchestrator.Verifier { return passthroughVerifier{} }, nil)
 	// Skip static analysis: this test exercises the context builder only.
 	orch.SetAnalysisConfig(config.StaticAnalysisConfig{Enabled: false})
+	// Generous load timeout: the production default is 10s, but parallel
+	// test runs can slow the go/packages load beyond that.
+	orch.SetContextBuilderFactory(func(wsRoot string) orchestrator.ContextBuilder {
+		b := ctxcontext.NewBuilder(wsRoot, logger)
+		b.LoadTimeout = 60 * time.Second
+		return b
+	})
 
 	if _, err := orch.Run(context.Background(), orchestrator.Input{
 		RepoFullName:  "owner/repo",
@@ -361,5 +370,139 @@ func TestE2EContextInjectionOnSignatureChange(t *testing.T) {
 		assert.Positive(t, c.Line)
 		assert.Contains(t, c.Snippet, "CalculateTotal")
 		assert.NotEmpty(t, c.CallerFunc)
+	}
+}
+
+// stubAgent counts invocations and returns one canned finding so the
+// verifier has something to verify (v1.2 strategy tests).
+type stubAgent struct {
+	name string
+	mu   sync.Mutex
+	ins  []agents.ReviewInput
+}
+
+func (s *stubAgent) Name() string { return s.name }
+
+func (s *stubAgent) Review(_ context.Context, in agents.ReviewInput) ([]agents.AgentFinding, error) {
+	s.mu.Lock()
+	s.ins = append(s.ins, in)
+	s.mu.Unlock()
+	file := "f.go"
+	if len(in.Diffs) > 0 && in.Diffs[0].Path != "" {
+		file = in.Diffs[0].Path
+	}
+	return []agents.AgentFinding{{
+		Agent: s.name, Severity: "warning", FilePath: file, LineNumber: 1,
+		Message: "stub finding", CodeSnippet: "x", Confidence: 0.5,
+	}}, nil
+}
+
+func (s *stubAgent) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.ins)
+}
+
+// countingVerifier counts verification calls and accepts every finding.
+type countingVerifier struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (v *countingVerifier) Verify(_ context.Context, findings []agents.AgentFinding, _ agents.ReviewInput) ([]agents.VerifiedFinding, error) {
+	v.mu.Lock()
+	v.calls++
+	v.mu.Unlock()
+	out := make([]agents.VerifiedFinding, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, agents.VerifiedFinding{AgentFinding: f, Confidence: 0.9})
+	}
+	return out, nil
+}
+
+// TestE2EStrategySwitching is the v1.2 T37 deliverable: the real
+// deterministic assessor + selector must switch the agent set based on the
+// dataset samples (AC-74, AC-76).
+func TestE2EStrategySwitching(t *testing.T) {
+	tests := []struct {
+		name         string
+		sampleDir    string
+		wantLevel    review.ComplexityLevel
+		wantAgents   []string
+		wantVerifier bool
+	}{
+		{
+			name:         "trivial sample: 5-line diff, 1 file => only security+lint, no verifier",
+			sampleDir:    filepath.Join("..", "..", "eval", "dataset", "sample-trivial"),
+			wantLevel:    review.ComplexityTrivial,
+			wantAgents:   []string{"security", "lint"},
+			wantVerifier: false,
+		},
+		{
+			name:         "complex sample: 300-line diff => all 4 agents + verifier",
+			sampleDir:    filepath.Join("..", "..", "eval", "dataset", "sample-complex"),
+			wantLevel:    review.ComplexityComplex,
+			wantAgents:   []string{"security", "logic", "performance", "lint"},
+			wantVerifier: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			diffText, err := os.ReadFile(filepath.Join(tc.sampleDir, "pr.diff"))
+			require.NoError(t, err, "read sample diff")
+
+			logger := zap.NewNop()
+			names := []string{"security", "logic", "performance", "lint"}
+			agentsByName := map[string]*stubAgent{}
+			reviewAgents := make([]agents.ReviewAgent, 0, len(names))
+			for _, n := range names {
+				a := &stubAgent{name: n}
+				agentsByName[n] = a
+				reviewAgents = append(reviewAgents, a)
+			}
+			verifier := &countingVerifier{}
+			orch := orchestrator.New(logger, t.TempDir(), reviewAgents,
+				func(string) orchestrator.Verifier { return verifier }, nil)
+			// Skip static analysis: this test exercises the strategy only.
+			orch.SetAnalysisConfig(config.StaticAnalysisConfig{Enabled: false})
+
+			res, err := orch.Run(context.Background(), orchestrator.Input{
+				RepoFullName:  "owner/repo",
+				PRNumber:      11,
+				HeadSHA:       "strategy-" + tc.name,
+				DiffText:      string(diffText),
+				WorkspaceRoot: t.TempDir(),
+			})
+			require.NoError(t, err, "orchestrator.Run")
+
+			assert.Equal(t, tc.wantLevel, res.ComplexityLevel, "complexity level")
+
+			enabled := map[string]bool{}
+			for _, n := range tc.wantAgents {
+				enabled[n] = true
+			}
+			for _, n := range names {
+				got := agentsByName[n].callCount()
+				if enabled[n] {
+					assert.Equal(t, 1, got, "agent %s should run once", n)
+					assert.Equal(t, "executed", res.AgentStatus[n])
+				} else {
+					assert.Equal(t, 0, got, "agent %s must be skipped", n)
+					assert.Equal(t, "skipped_by_strategy", res.AgentStatus[n])
+				}
+			}
+
+			if tc.wantVerifier {
+				assert.Equal(t, 1, verifier.calls, "verifier should run")
+			} else {
+				assert.Equal(t, 0, verifier.calls, "verifier must be skipped")
+				// Skipped verifier accepts raw findings with full confidence.
+				require.NotEmpty(t, res.Findings)
+				for _, f := range res.Findings {
+					assert.Equal(t, 1.0, f.Confidence, "skipped verifier sets confidence 1.0")
+				}
+			}
+		})
 	}
 }

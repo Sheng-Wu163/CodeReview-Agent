@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -112,6 +113,21 @@ func (m *mockStore) UpdateReviewPreFindings(_ context.Context, id int64, preFind
 		return fmt.Errorf("review %d not found", id)
 	}
 	rev.PreFindings = preFindings
+	return nil
+}
+
+func (m *mockStore) UpdateReviewAgentStatus(_ context.Context, id int64, status map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rev := m.reviews[id]
+	if rev == nil {
+		return fmt.Errorf("review %d not found", id)
+	}
+	data, err := json.Marshal(status)
+	if err != nil {
+		return err
+	}
+	rev.AgentStatus = string(data)
 	return nil
 }
 

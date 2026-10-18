@@ -60,6 +60,23 @@ type StaticAnalysisConfig struct {
 	GolangciConfigPath string `mapstructure:"golangci_config_path"`
 	// Tools toggles the individual analyzers (FR-20 degradation).
 	Tools StaticAnalysisTools `mapstructure:"tools"`
+	// Adaptive configures the v1.2 complexity-based review strategy
+	// (FR-38).
+	Adaptive AdaptiveConfig `mapstructure:"adaptive"`
+}
+
+// AdaptiveConfig holds the deterministic complexity thresholds of the v1.2
+// adaptive review strategy (FR-34/FR-38). Zero/empty values fall back to the
+// built-in defaults in internal/review.
+type AdaptiveConfig struct {
+	// TrivialMaxLines is the exclusive upper line bound for Trivial.
+	TrivialMaxLines int `mapstructure:"trivial_max_lines"`
+	// ComplexMinLines is the exclusive lower line bound for Complex.
+	ComplexMinLines int `mapstructure:"complex_min_lines"`
+	// ComplexMinFiles is the exclusive file-count bound for Complex.
+	ComplexMinFiles int `mapstructure:"complex_min_files"`
+	// SensitivePaths force the Complex level; empty uses built-in defaults.
+	SensitivePaths []string `mapstructure:"sensitive_paths"`
 }
 
 // StaticAnalysisTools holds per-tool enable switches.
@@ -121,6 +138,9 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("static_analysis.tools.semgrep.enabled", true)
 	v.SetDefault("static_analysis.tools.golangci_lint.enabled", true)
 	v.SetDefault("static_analysis.tools.gitleaks.enabled", true)
+	v.SetDefault("static_analysis.adaptive.trivial_max_lines", 20)
+	v.SetDefault("static_analysis.adaptive.complex_min_lines", 200)
+	v.SetDefault("static_analysis.adaptive.complex_min_files", 5)
 
 	// Environment variable bindings. BindEnv ensures that Unmarshal picks up
 	// environment values even for keys that are absent from the YAML file.

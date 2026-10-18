@@ -1,0 +1,13 @@
+diff --git a/internal/util/format.go b/internal/util/format.go
+index 83db48f..2c47bf9 100644
+--- a/internal/util/format.go
++++ b/internal/util/format.go
+@@ -1,3 +1,8 @@
+ package util
+ 
++// Trim trims surrounding whitespace.
++func Trim(s string) string {
++	return s
++}
++
+ func Format() {}

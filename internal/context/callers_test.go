@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeModule writes a temp Go module with the given files and returns its
@@ -24,6 +25,16 @@ func writeModule(t *testing.T, files map[string]string) string {
 	return root
 }
 
+// newTestRetriever creates a retriever with a load timeout generous enough
+// to tolerate parallel test runs (the production default is 10s per
+// CLAUDE.v.1.1.md, but `go test ./...` executes all packages concurrently
+// and the machine can be heavily loaded).
+func newTestRetriever(root string) *CallerRetriever {
+	r := NewCallerRetriever(root, nil)
+	r.LoadTimeout = 60 * time.Second
+	return r
+}
+
 func TestCallerRetrieverFindsCallSites(t *testing.T) {
 	root := writeModule(t, map[string]string{
 		"def.go":      "package fixture\n\ntype Item struct{}\n\nfunc CalculateTotal(items []Item) float64 {\n\treturn 0\n}\n",
@@ -31,8 +42,7 @@ func TestCallerRetrieverFindsCallSites(t *testing.T) {
 		"caller_b.go": "package fixture\n\nfunc B() float64 {\n\treturn CalculateTotal(nil)\n}\n\nfunc C() float64 {\n\treturn CalculateTotal(nil)\n}\n",
 	})
 
-	r := NewCallerRetriever(root, nil)
-	got := r.FindCallers(context.Background(), []StructuralChange{
+	got := newTestRetriever(root).FindCallers(context.Background(), []StructuralChange{
 		{FilePath: "def.go", FunctionName: "CalculateTotal", ChangeType: SignatureChanged},
 	})
 
@@ -67,8 +77,7 @@ func TestCallerRetrieverTruncatesAt10(t *testing.T) {
 	}
 	root := writeModule(t, map[string]string{"many.go": b.String()})
 
-	r := NewCallerRetriever(root, nil)
-	got := r.FindCallers(context.Background(), []StructuralChange{
+	got := newTestRetriever(root).FindCallers(context.Background(), []StructuralChange{
 		{FilePath: "many.go", FunctionName: "CalculateTotal", ChangeType: SignatureChanged},
 	})
 
@@ -86,8 +95,7 @@ func TestCallerRetrieverDegradesOnBrokenPackage(t *testing.T) {
 		"broken.go": "package fixture\n\nfunc broken( {\n",
 	})
 
-	r := NewCallerRetriever(root, nil)
-	got := r.FindCallers(context.Background(), []StructuralChange{
+	got := newTestRetriever(root).FindCallers(context.Background(), []StructuralChange{
 		{FilePath: "broken.go", FunctionName: "Broken", ChangeType: SignatureChanged},
 	})
 

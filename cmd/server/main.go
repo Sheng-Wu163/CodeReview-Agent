@@ -24,6 +24,7 @@ import (
 	"codereviewagent/internal/middleware"
 	"codereviewagent/internal/orchestrator"
 	"codereviewagent/internal/repository"
+	"codereviewagent/internal/review"
 )
 
 func main() {
@@ -91,6 +92,12 @@ func run() error {
 			return agents.NewVerifier(tools.ReadFileTool{Root: root}, nil)
 		}, nil)
 	orch.SetAnalysisConfig(cfg.StaticAnalysis)
+	orch.SetReviewStrategy(review.NewAssessor(review.AssessorOptions{
+		TrivialMaxLines: cfg.StaticAnalysis.Adaptive.TrivialMaxLines,
+		ComplexMinLines: cfg.StaticAnalysis.Adaptive.ComplexMinLines,
+		ComplexMinFiles: cfg.StaticAnalysis.Adaptive.ComplexMinFiles,
+		SensitivePaths:  cfg.StaticAnalysis.Adaptive.SensitivePaths,
+	}), review.NewSelector())
 	ghClient := github.NewClient(cfg.GitHubToken)
 	pipeline := orchestrator.NewPipeline(orch, ghClient, store, cfg.GitHubToken, logger)
 	reviewProc = eventProcessorAdapter{pipeline: pipeline}

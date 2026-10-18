@@ -9,10 +9,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"codereviewagent/internal/diff"
 )
+
+// golangciRunMu serializes in-process golangci-lint invocations: the CLI
+// enforces a single global instance, so concurrent same-package jobs (e.g.
+// the pipeline worker pool linting several files of one package) would
+// fail-fast against each other. Cross-process contention is handled by the
+// retry loop below.
+var golangciRunMu sync.Mutex
 
 // DefaultGolangciBinary is the default golangci-lint binary name.
 const DefaultGolangciBinary = "golangci-lint"
@@ -95,21 +103,27 @@ func (a GolangciLintAnalyzer) Analyze(ctx context.Context, file diff.FileDiff) (
 
 	// golangci-lint enforces a single global instance ("parallel
 	// golangci-lint is running"), which also triggers when two PR reviews
-	// run concurrently. Retry with backoff while the lock is held, staying
-	// within the caller's context budget.
-	const maxAttempts = 3
+	// (or two test packages) run concurrently. Retry with backoff while the
+	// lock is held, staying within the caller's context budget: a competing
+	// run can hold the lock for up to a minute.
+	const (
+		maxAttempts   = 8
+		lockRetryWait = 10 * time.Second
+	)
 	for attempt := 1; ; attempt++ {
+		golangciRunMu.Lock()
 		var stderr bytes.Buffer
 		cmd := exec.CommandContext(ctx, binary, args...)
 		cmd.Dir = a.Root
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
+		golangciRunMu.Unlock()
 
 		if attempt < maxAttempts && isParallelLockError(err, out, &stderr) {
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("golangci-lint: %w", ctx.Err())
-			case <-time.After(5 * time.Second):
+			case <-time.After(lockRetryWait):
 				continue
 			}
 		}
