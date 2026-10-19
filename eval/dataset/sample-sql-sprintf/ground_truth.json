@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/store/order.go", "Line": 16, "Severity": "critical", "Category": "security", "Message": "SQL injection: query built with fmt.Sprintf from user-controlled orderID/userID"}
+  ]

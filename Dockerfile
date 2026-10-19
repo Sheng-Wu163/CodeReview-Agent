@@ -19,6 +19,7 @@ USER app
 WORKDIR /app
 COPY --from=builder /bin/codereviewagent /app/codereviewagent
 COPY --from=builder /app/templates /app/templates
+COPY --from=builder /app/static /app/static
 
 EXPOSE 8080
 ENTRYPOINT ["/app/codereviewagent"]

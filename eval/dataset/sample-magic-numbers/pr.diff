@@ -1,0 +1,12 @@
+diff --git a/internal/billing/fee.go b/internal/billing/fee.go
+new file mode 100644
+index 0000000..83db48f
+--- /dev/null
++++ b/internal/billing/fee.go
+@@ -0,0 +1,6 @@
++package billing
++
++// Fee returns the transaction fee in cents.
++func Fee(amountCents int) int {
++	return amountCents * 143 / 10000
++}

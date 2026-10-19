@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tmc/langchaingo/llms"
+	ltools "github.com/tmc/langchaingo/tools"
 	"go.uber.org/zap"
 
 	"codereviewagent/internal/ai/agents"
@@ -519,5 +521,107 @@ func TestOrchestratorComplexStrategyRunsAll(t *testing.T) {
 	}
 	if res.ComplexityLevel != review.ComplexityComplex {
 		t.Errorf("ComplexityLevel = %q, want complex", res.ComplexityLevel)
+	}
+}
+
+// TestOrchestratorEmitsReviewEvents verifies the v1.7 FR-44 event stream
+// (T44 completion): a mock channel receives status/agent_start/finding/done
+// events in order, each with the {event, data} JSON shape.
+func TestOrchestratorEmitsReviewEvents(t *testing.T) {
+	agts, _ := fourAgents()
+	verifier := &mockVerifier{verified: []agents.VerifiedFinding{
+		{AgentFinding: finding("security", "critical", "SQL injection"), Confidence: 0.9},
+	}}
+	o := newTestOrchestrator(t, agts, verifier)
+
+	ch := make(chan ReviewEvent, 128)
+	o.SetEventChan(ch)
+
+	if _, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 9, HeadSHA: "events-sha", DiffText: reviewDiff(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	close(ch)
+
+	var (
+		agentStarts, findingEvents, statusEvents, doneEvents int
+		doneSeenAgentStart, doneSeenFinding                  bool
+	)
+	for ev := range ch {
+		// AC-93: the wire shape must be {event: string, data: object}.
+		wire, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(wire, &decoded); err != nil {
+			t.Fatalf("event JSON: %v", err)
+		}
+		if _, ok := decoded["event"].(string); !ok {
+			t.Errorf("event missing string 'event' field: %s", wire)
+		}
+		if _, ok := decoded["data"].(map[string]any); !ok {
+			t.Errorf("event missing object 'data' field: %s", wire)
+		}
+
+		switch ev.Event {
+		case EventAgentStart:
+			agentStarts++
+		case EventFinding:
+			findingEvents++
+		case EventStatus:
+			statusEvents++
+		case EventDone:
+			doneEvents++
+			doneSeenAgentStart = agentStarts > 0
+			doneSeenFinding = findingEvents > 0
+		}
+	}
+
+	if statusEvents == 0 {
+		t.Error("expected at least one status event")
+	}
+	if agentStarts != 4 {
+		t.Errorf("agent_start events = %d, want 4", agentStarts)
+	}
+	if findingEvents == 0 {
+		t.Error("expected at least one finding event")
+	}
+	if doneEvents != 1 {
+		t.Errorf("done events = %d, want 1", doneEvents)
+	}
+	if !doneSeenAgentStart || !doneSeenFinding {
+		t.Error("done event must come after agent_start and finding events")
+	}
+}
+
+// TestWrapToolsEmitsToolCall verifies the tool_call event wrapper (FR-44).
+func TestWrapToolsEmitsToolCall(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inner := itools.ReadFileTool{Root: root}
+	events := make(chan ReviewEvent, 8)
+	wrapped := wrapTools([]ltools.Tool{inner}, "security", func(ev ReviewEvent) { events <- ev })
+
+	if len(wrapped) != 1 {
+		t.Fatalf("wrapped tools = %d, want 1", len(wrapped))
+	}
+	if _, err := wrapped[0].Call(context.Background(), "a.go"); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Event != EventToolCall {
+			t.Errorf("event = %q, want tool_call", ev.Event)
+		}
+		if ev.Data["agent"] != "security" || ev.Data["tool"] != "read_file" || ev.Data["input"] != "a.go" {
+			t.Errorf("tool_call data = %v", ev.Data)
+		}
+	default:
+		t.Fatal("no tool_call event emitted")
 	}
 }

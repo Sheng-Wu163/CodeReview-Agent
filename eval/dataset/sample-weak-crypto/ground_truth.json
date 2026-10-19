@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/auth/hash.go", "Line": 10, "Severity": "critical", "Category": "security", "Message": "MD5 used for password hashing; use bcrypt/argon2 with a per-user salt"}
+  ]

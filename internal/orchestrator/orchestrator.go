@@ -5,6 +5,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -137,6 +138,9 @@ type Orchestrator struct {
 	// (FR-34/FR-35). They never call an LLM.
 	assessor ComplexityAssessor
 	selector StrategySelector
+	// events is the optional SSE review-stream sink (v1.7 FR-44). Nil
+	// disables event emission.
+	events chan<- ReviewEvent
 	// staticCfg is the static analysis configuration applied by
 	// analysisFactory (set via SetAnalysisConfig).
 	staticCfg config.StaticAnalysisConfig
@@ -225,6 +229,14 @@ func (o *Orchestrator) SetAnalysisConfig(cfg config.StaticAnalysisConfig) {
 	o.staticCfg = cfg
 }
 
+// SetEventChan wires the SSE review-stream sink (v1.7 FR-44). Every
+// subsequent Run emits its lifecycle events (status, agent_start, tool_call,
+// finding, done) into ch non-blockingly; pass nil to disable. Must be called
+// before Run.
+func (o *Orchestrator) SetEventChan(ch chan<- ReviewEvent) {
+	o.events = ch
+}
+
 // severityRank orders findings critical > warning > suggestion > unknown.
 var severityRank = map[string]int{
 	agents.SeverityCritical:   0,
@@ -244,6 +256,24 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 	files, err := diff.Parse(in.DiffText)
 	if err != nil {
 		return nil, fmt.Errorf("parse diff: %w", err)
+	}
+
+	// emit is the run-scoped event emitter (v1.7 FR-44): it stamps every
+	// event with the review identity so the SSE broker can route it.
+	emit := func(ev ReviewEvent) {
+		if ev.Data == nil {
+			ev.Data = map[string]any{}
+		}
+		ev.Data["repo_full_name"] = in.RepoFullName
+		ev.Data["pr_number"] = in.PRNumber
+		o.emitEvent(ev)
+	}
+	emitStatus := func(stage, message string, extra map[string]any) {
+		data := map[string]any{"stage": stage, "message": message}
+		for k, v := range extra {
+			data[k] = v
+		}
+		emit(ReviewEvent{Event: EventStatus, Data: data})
 	}
 
 	// Step 3: filter files (FR-04) and skip binaries (AC-24).
@@ -283,6 +313,9 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		"level", strategy.Level,
 		"agents", strategy.EnabledAgents,
 		"verifier", strategy.EnableVerifier)
+	emit(ReviewEvent{Event: EventStatus, Data: map[string]any{
+		"stage": "strategy", "message": "复杂度评估: " + strategy.Level,
+	}})
 
 	// Meaningful-change gate: comment-only diffs skip the whole review.
 	hasChanges := false
@@ -297,6 +330,10 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		res.Duration = time.Since(start)
 		o.logger.Sugar().Infow("no meaningful changes, skipping review",
 			"repo", in.RepoFullName, "pr", in.PRNumber)
+		emit(ReviewEvent{Event: EventDone, Data: map[string]any{
+			"findings": 0, "duration_ms": res.Duration.Milliseconds(),
+			"markdown": "LGTM ✅（无有效代码变更，已跳过审查）",
+		}})
 		return res, nil
 	}
 	for _, f := range reviewable {
@@ -315,6 +352,7 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 	}
 	var preFindings []analysis.PreAnalysisFinding
 	if o.analysisFactory != nil {
+		emitStatus("static-analysis", "正在运行静态分析...", nil)
 		analysisRes, err := o.analysisFactory(root).Run(ctx, reviewable)
 		if err != nil {
 			// All static analysis tools unavailable: agents degrade to pure
@@ -333,6 +371,8 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 			o.logger.Sugar().Infow("static analysis completed",
 				"findings", len(preFindings), "elapsed", analysisRes.Duration)
 			res.PreFindings = preFindings
+			emitStatus("static-analysis", fmt.Sprintf("静态分析完成，发现 %d 条已知问题", len(preFindings)),
+				map[string]any{"findings": len(preFindings)})
 		}
 	}
 
@@ -377,7 +417,12 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		}
 		g.Go(func() error {
 			agentStart := time.Now()
-			fnd, err := o.runAgent(ctx, agent, agentInput)
+			emit(ReviewEvent{Event: EventAgentStart, Data: map[string]any{"agent": agent.Name()}})
+			// Per-agent tool copies: every tool call is reported to the
+			// event stream under this agent's name (v1.7 FR-44).
+			agentRunInput := agentInput
+			agentRunInput.Tools = wrapTools(agentInput.Tools, agent.Name(), emit)
+			fnd, err := o.runAgent(ctx, agent, agentRunInput)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -389,6 +434,15 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 				return nil // do not fail the group
 			}
 			rawFindings = append(rawFindings, fnd...)
+			for _, f := range fnd {
+				data, err := json.Marshal(f)
+				if err == nil {
+					var payload map[string]any
+					if err := json.Unmarshal(data, &payload); err == nil {
+						emit(ReviewEvent{Event: EventFinding, Data: payload})
+					}
+				}
+			}
 			o.logger.Sugar().Infow("review agent finished",
 				"agent", agent.Name(),
 				"findings", len(fnd),
@@ -432,7 +486,35 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		"final_findings", len(res.Findings),
 		"agent_errors", len(res.AgentErrors),
 		"duration", res.Duration)
+	emit(ReviewEvent{Event: EventDone, Data: map[string]any{
+		"findings":    len(res.Findings),
+		"duration_ms": res.Duration.Milliseconds(),
+		"markdown":    finalMarkdown(res.Findings),
+	}})
 	return res, nil
+}
+
+// finalMarkdown renders the verified findings as a compact markdown report
+// for the SSE review stream (v1.7 FR-44 done event).
+func finalMarkdown(findings []agents.VerifiedFinding) string {
+	if len(findings) == 0 {
+		return "LGTM ✅（未发现问题）"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "## 审查结果（%d 条发现）\n\n", len(findings))
+	for _, f := range findings {
+		fmt.Fprintf(&b, "### %s `%s:%d`\n\n", strings.ToUpper(f.Severity), f.FilePath, f.LineNumber)
+		fmt.Fprintf(&b, "%s\n\n", f.Message)
+		if f.CodeSnippet != "" {
+			b.WriteString("```go\n")
+			b.WriteString(f.CodeSnippet)
+			b.WriteString("\n```\n\n")
+		}
+		if f.Suggestion != "" {
+			fmt.Fprintf(&b, "**建议**: %s\n\n", f.Suggestion)
+		}
+	}
+	return b.String()
 }
 
 // runAgent executes one agent under its own timeout (AC-22).

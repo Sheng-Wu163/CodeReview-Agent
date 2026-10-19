@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/worker/loop.go", "Line": 7, "Severity": "warning", "Category": "logic", "Message": "goroutine leak: no stop channel or context, the loop runs for the process lifetime"}
+  ]

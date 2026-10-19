@@ -1,0 +1,24 @@
+/* CodeReviewAgent review-stream page extras (v1.7). */
+.fade-in {
+  animation: fadeIn 300ms ease-in;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+/* Code blocks inside markdown reports. */
+.markdown pre {
+  background: #0d1117;
+  border: 1px solid #1f2937;
+  border-radius: 6px;
+  padding: 0.75rem;
+  overflow-x: auto;
+}
+.markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+.markdown h2, .markdown h3 {
+  color: #e5e7eb;
+  margin-top: 0.5rem;
+}

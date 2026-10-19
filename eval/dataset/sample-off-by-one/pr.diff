@@ -1,0 +1,16 @@
+diff --git a/internal/pager/page.go b/internal/pager/page.go
+new file mode 100644
+index 0000000..83db48f
+--- /dev/null
++++ b/internal/pager/page.go
+@@ -0,0 +1,10 @@
++package pager
++
++// LastPage returns the last 1-based page index.
++func LastPage(total, perPage int) int {
++	if perPage <= 0 {
++		return 1
++	}
++	pages := total / perPage
++	return pages
++}

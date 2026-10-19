@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/billingclient/client.go", "Line": 10, "Severity": "critical", "Category": "security", "Message": "hardcoded API key in source; load from configuration or a secret manager"}
+  ]

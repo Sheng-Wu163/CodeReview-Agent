@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/queue/take.go", "Line": 5, "Severity": "suggestion", "Category": "performance", "Message": "preallocate out with make([]int, 0, n) to avoid repeated growth"}
+  ]

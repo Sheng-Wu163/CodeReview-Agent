@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/store/emails.go", "Line": 9, "Severity": "warning", "Category": "performance", "Message": "N+1 queries: one round-trip per id inside the loop; fetch all ids with a single IN query"}
+  ]

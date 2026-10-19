@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/ops/resize.go", "Line": 10, "Severity": "critical", "Category": "security", "Message": "command injection: user-controlled path/size flow into exec.Command without validation"}
+  ]

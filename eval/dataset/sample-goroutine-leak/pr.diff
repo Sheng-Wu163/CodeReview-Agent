@@ -1,0 +1,19 @@
+diff --git a/internal/worker/loop.go b/internal/worker/loop.go
+new file mode 100644
+index 0000000..83db48f
+--- /dev/null
++++ b/internal/worker/loop.go
+@@ -0,0 +1,13 @@
++package worker
++
++import "time"
++
++// Start launches the periodic job.
++func Start(fn func()) {
++	go func() {
++		for {
++			fn()
++			time.Sleep(time.Minute)
++		}
++	}()
++}

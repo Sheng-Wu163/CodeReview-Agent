@@ -1,0 +1,19 @@
+diff --git a/internal/queue/take.go b/internal/queue/take.go
+new file mode 100644
+index 0000000..83db48f
+--- /dev/null
++++ b/internal/queue/take.go
+@@ -0,0 +1,13 @@
++package queue
++
++// Take returns at most n pending ids.
++func Take(pending []int, n int) []int {
++	var out []int
++	for _, id := range pending {
++		if len(out) >= n {
++			break
++		}
++		out = append(out, id)
++	}
++	return out
++}

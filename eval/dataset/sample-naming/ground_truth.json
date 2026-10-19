@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/api/user_handler.go", "Line": 6, "Severity": "suggestion", "Category": "style", "Message": "naming convention: underscores in Get_User_Data; use GetUserData"}
+  ]

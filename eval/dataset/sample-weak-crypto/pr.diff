@@ -1,0 +1,18 @@
+diff --git a/internal/auth/hash.go b/internal/auth/hash.go
+new file mode 100644
+index 0000000..83db48f
+--- /dev/null
++++ b/internal/auth/hash.go
+@@ -0,0 +1,12 @@
++package auth
++
++import (
++	"crypto/md5"
++	"encoding/hex"
++)
++
++// HashPassword hashes the password for storage.
++func HashPassword(password string) string {
++	sum := md5.Sum([]byte(password))
++	return hex.EncodeToString(sum[:])
++}

@@ -108,6 +108,19 @@ func run() error {
 	feedbackRepo := repository.NewFeedbackRepo(pool)
 	var feedbackTracker handler.FeedbackTracker = feedback.NewTracker(feedbackRepo, ghClient, cfg.Feedback.SimilarityThreshold, logger)
 
+	// v1.7: SSE review stream - the orchestrator's lifecycle events fan out
+	// through an in-process broker, keyed by "<repo>#<pr>".
+	eventBroker := handler.NewEventBroker()
+	eventCh := make(chan orchestrator.ReviewEvent, 256)
+	orch.SetEventChan(eventCh)
+	go func() {
+		for ev := range eventCh {
+			routeEvent(eventBroker, ev)
+		}
+	}()
+	handler.MountStreamReview(r, eventBroker, logger)
+	handler.MountStatic(r, "./static")
+
 	r.With(middleware.HMACVerify(cfg.WebhookSecret)).
 		Post("/webhook", handler.NewWebhook(logger, reviewProc, feedbackTracker).ServeHTTP)
 
@@ -146,6 +159,16 @@ func apiKeyFor(cfg *config.Config) string {
 		return cfg.AnthropicAPIKey
 	}
 	return cfg.OpenAIAPIKey
+}
+
+// routeEvent publishes a review-stream event under its topic "<repo>#<pr>"
+// (v1.7).
+func routeEvent(broker *handler.EventBroker, ev orchestrator.ReviewEvent) {
+	repo, _ := ev.Data["repo_full_name"].(string)
+	if repo == "" {
+		return
+	}
+	broker.Publish(fmt.Sprintf("%s#%v", repo, ev.Data["pr_number"]), ev)
 }
 
 // eventProcessorAdapter adapts handler.PullRequestEvent to the pipeline's

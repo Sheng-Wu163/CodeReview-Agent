@@ -12,5 +12,19 @@
     "Severity": "warning",
     "Category": "logic",
     "Message": "unhandled json.Unmarshal error return"
+  },
+  {
+    "FilePath": "db.go",
+    "Line": 19,
+    "Severity": "warning",
+    "Category": "style",
+    "Message": "errcheck-class violation: json.Unmarshal error silently swallowed, invalid input can never be reported (confirmed via UBV review)"
+  },
+  {
+    "FilePath": "db.go",
+    "Line": 12,
+    "Severity": "suggestion",
+    "Category": "style",
+    "Message": "getter name uses unidiomatic 'Get' prefix; Effective Go recommends omitting 'Get' (confirmed via UBV review)"
   }
 ]

@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/files/serve.go", "Line": 11, "Severity": "warning", "Category": "security", "Message": "path traversal: name is joined without filepath.Clean/contains check, '..' escapes the uploads dir"}
+  ]

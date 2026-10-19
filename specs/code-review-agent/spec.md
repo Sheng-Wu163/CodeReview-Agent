@@ -713,3 +713,38 @@ type FeedbackTracker interface {
 - ADDED: `github.Client.GetFileAtRef`（按 ref 拉取文件，404 → ErrFileNotFound）
 - ADDED: `db.EnsureDatabase`（测试包数据库隔离，消除并行 truncate 互相干扰）
 - MODIFIED: Webhook 处理 `synchronize`（before/after SHA）与 `closed`（merged）动作，异步分发 Tracker（FR-40）
+
+## 16. v1.7 前端可视化重构
+
+### 16.1 Requirements
+
+**FR-44: SSE 审查流接口**
+系统必须新增 `GET /api/stream-review?pr_id={id}` 接口。该接口使用 SSE (Server-Sent Events) 协议，在 Orchestrator 执行过程中，实时推送 5 种结构化事件（status, agent_start, tool_call, finding, done）。
+
+**FR-45: 无构建前端页面**
+系统必须在 `static/` 目录下提供一个无构建的 Vue 3 单页应用（SPA），通过 CDN 引入 Vue 3、Tailwind CSS、marked.js 和 highlight.js，不引入 Node.js 构建链。
+
+**FR-46: 双栏布局与过程可视化**
+页面必须包含双栏布局：
+- **左侧**：输入区（用于触发模拟审查）和审查历史列表。
+- **右侧**：Agent 执行流展示。必须以时间轴的形式实时展示 Agent 的状态切换、工具调用过程（显示工具名和参数），以及流式输出的 Markdown 结果。
+
+**FR-47: 状态与色彩标识**
+前端必须根据 `agent` 字段（security, logic, performance, lint, verifier）使用不同的颜色高亮，并根据 `severity`（critical, warning, suggestion）展示不同的图标。
+
+### 16.2 Edge Cases
+
+| 场景 | 期望行为 |
+|------|---------|
+| SSE 连接网络断开 | 前端显示 "连接已断开，请刷新重试" 提示，并自动重连 1 次 |
+| 后端返回的 Markdown 包含恶意 `<script>` | `marked.js` 渲染时需进行 XSS 转义（使用 `DOMPurify` 或在配置中禁用 HTML 标签解析） |
+| 审查历史为空 | 左侧列表显示 "暂无审查记录" |
+
+## CHANGELOG
+
+### v1.7 (2026-10-18) — tag: v1.7-complete
+- ADDED: SSE 流式审查接口 `GET /api/stream-review?pr_id={id}`（status/agent_start/tool_call/finding/done 五类事件，FR-44）
+- ADDED: Vue 3 无构建可视化前端（`static/`，CDN 引入 Vue/Tailwind/marked/DOMPurify/highlight.js，FR-45）
+- ADDED: 双栏布局：左侧触发区+审查历史，右侧 Agent 执行时间轴（FR-46）
+- MODIFIED: Orchestrator 增加事件回调钩子（SetEventChan + 工具包装器，FR-44）
+- ADDED: XSS 防护（DOMPurify 清洗 LLM 输出）与断线自动重连（spec 16.2）

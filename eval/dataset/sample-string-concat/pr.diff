@@ -1,0 +1,16 @@
+diff --git a/internal/render/table.go b/internal/render/table.go
+new file mode 100644
+index 0000000..83db48f
+--- /dev/null
++++ b/internal/render/table.go
+@@ -0,0 +1,10 @@
++package render
++
++// Table renders the rows as an HTML table.
++func Table(rows []string) string {
++	var html string
++	for _, r := range rows {
++		html += "<tr><td>" + r + "</td></tr>"
++	}
++	return html
++}

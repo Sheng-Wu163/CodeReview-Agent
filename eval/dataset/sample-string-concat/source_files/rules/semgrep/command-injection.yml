@@ -1,0 +1,10 @@
+rules:
+  - id: command-injection-concat
+    message: Shell command built by string concatenation allows command injection
+    languages:
+      - go
+    severity: ERROR
+    pattern-either:
+      - pattern: exec.Command($A + $B, ...)
+      - pattern: exec.CommandContext($CTX, $A + $B, ...)
+      - pattern: syscall.Exec($A + $B, ...)

@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/pager/page.go", "Line": 8, "Severity": "warning", "Category": "logic", "Message": "off-by-one: integer division drops the partial page (total=101, perPage=100 reports 1 page, want 2)"}
+  ]

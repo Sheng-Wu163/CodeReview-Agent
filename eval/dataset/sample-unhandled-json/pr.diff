@@ -1,0 +1,16 @@
+diff --git a/internal/api/decode.go b/internal/api/decode.go
+new file mode 100644
+index 0000000..83db48f
+--- /dev/null
++++ b/internal/api/decode.go
+@@ -0,0 +1,10 @@
++package api
++
++import "encoding/json"
++
++// DecodeConfig parses the raw config payload.
++func DecodeConfig(data []byte) map[string]string {
++	var cfg map[string]string
++	json.Unmarshal(data, &cfg)
++	return cfg
++}

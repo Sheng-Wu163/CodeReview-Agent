@@ -573,3 +573,57 @@ T10 + T11 + T12 → T13 → T14
 - **依赖**：T42
 - **预估**：3h
 - **状态**：✅ 已完成
+
+## 阶段十：v1.7 前端可视化重构（T44-T48）
+
+### T44: 定义 SSE 事件结构并改造 Orchestrator
+- **描述**：
+  1. 在 `internal/orchestrator` 中定义 `ReviewEvent` 结构体。
+  2. 修改 Orchestrator，使其接收一个 `chan<- ReviewEvent` 或 `EventEmitter` 接口，在关键节点（静态分析开始、Agent 启动、工具调用、发现生成）发送事件。
+- **文件路径**：
+  - `internal/orchestrator/events.go`
+  - `internal/orchestrator/orchestrator.go`
+- **完成标准**：单元测试中传入一个 Mock Channel，验证能接收到正确的 JSON 事件。
+- **依赖**：T36
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T45: 实现 SSE 路由接口
+- **描述**：使用 chi 路由和 Go 标准库 `http.Flusher` 实现 `GET /api/stream-review`。读取 Orchestrator 推送的事件流，并写入 SSE 响应（格式：`data: {json}\n\n`）。
+- **文件路径**：
+  - `internal/handler/sse.go`
+  - `internal/handler/sse_test.go`
+- **完成标准**：使用 `curl -N` 访问能持续收到事件数据；不触发 HTTP 超时。
+- **依赖**：T44
+- **预估**：2h
+- **状态**：✅ 已完成
+
+### T46: 前端页面骨架与 Vue 3 状态管理
+- **描述**：创建 `static/index.html`。引入 Tailwind、Vue 3、marked.js、highlight.js。实现左右分栏布局。定义 Vue 的响应式状态变量：`events` (接收的历史事件)、`isLoading`、`currentAgent`。
+- **文件路径**：
+  - `static/index.html`
+  - `static/app.js`
+  - `internal/handler/static.go` (挂载静态目录)
+- **完成标准**：访问根路由 `/` 能渲染出现代风格的空白页面。
+- **依赖**：T45
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T47: 前端 SSE 逻辑解析与 UI 渲染
+- **描述**：
+  1. 使用原生 `EventSource` 连接 `/api/stream-review`。
+  2. 根据收到的 `event` 类型，追加到时间轴列表中。
+  3. 工具调用展示 "🔧 正在读取文件..."，发现展示高亮的错误卡片。
+  4. 全部完成后，将最终的 Markdown 文本渲染到右侧。
+- **文件路径**：
+  - `static/app.js`
+- **完成标准**：手动触发请求，页面能平滑地展示打字机效果和完整的思考过程。
+- **依赖**：T46
+- **预估**：4h
+- **状态**：✅ 已完成
+
+### T48: v1.7 集成验证与交付
+- **描述**：更新 CHANGELOG、checklist。启动 Docker 验证整体效果，提示打 tag。
+- **依赖**：T47
+- **预估**：1h
+- **状态**：✅ 已完成

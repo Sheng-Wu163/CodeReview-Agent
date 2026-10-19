@@ -1,0 +1,3 @@
+[
+    {"FilePath": "internal/api/decode.go", "Line": 8, "Severity": "warning", "Category": "logic", "Message": "unhandled json.Unmarshal error: invalid input silently yields an empty config"}
+  ]

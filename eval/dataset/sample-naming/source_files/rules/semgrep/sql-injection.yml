@@ -1,0 +1,16 @@
+rules:
+  - id: sql-injection-concat
+    message: SQL built by string concatenation or Sprintf with user input allows SQL injection
+    languages:
+      - go
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: $DB.$FUNC($Q + $V, ...)
+          - pattern: $DB.$FUNC(fmt.Sprintf($Q, $V, ...), ...)
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: ^(Query|QueryRow|Exec|QueryContext|QueryRowContext|ExecContext)$
+      - metavariable-regex:
+          metavariable: $DB
+          regex: ^(db|tx|conn|stmt|q|DB|Tx|Conn|Stmt)$

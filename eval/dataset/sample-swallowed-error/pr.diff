@@ -1,0 +1,13 @@
+diff --git a/internal/cache/warm.go b/internal/cache/warm.go
+new file mode 100644
+index 0000000..83db48f
+--- /dev/null
++++ b/internal/cache/warm.go
+@@ -0,0 +1,7 @@
++package cache
++
++// Warm loads the entry and ignores any failure.
++func Warm(load func() ([]byte, error)) {
++	data, _ := load()
++	_ = data
++}
