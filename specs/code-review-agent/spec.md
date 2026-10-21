@@ -748,3 +748,68 @@ type FeedbackTracker interface {
 - ADDED: 双栏布局：左侧触发区+审查历史，右侧 Agent 执行时间轴（FR-46）
 - MODIFIED: Orchestrator 增加事件回调钩子（SetEventChan + 工具包装器，FR-44）
 - ADDED: XSS 防护（DOMPurify 清洗 LLM 输出）与断线自动重连（spec 16.2）
+
+### v1.8 (2026-10-21)
+- ADDED: `internal/harness` Harness 控制层（`Harness` 接口、`AgentResult`、`AgentStatus`，FR-48/FR-49）
+- ADDED: 工具调用五阶段治理：参数校验、单次超时、只读工具最多 2 次指数退避重试、SHA-256 指纹记录（FR-50）
+- ADDED: 路径震荡检测（连续 3 次相同指纹 / A-B-A-B 两轮交替）并返回 `ErrOscillation`（FR-51）
+- ADDED: 完成门禁：`completed` 且 `ToolCallCount == 0` 强制降级为 `partial`（`suspicious_no_tool_calls`）
+- MODIFIED: Orchestrator 通过 Harness 执行所有 Agent，仅 `completed`/`partial` 结果进入下游验证；failed Agent 写入 `reviews.agent_results` 并在 Review 评论中报警
+- ADDED: 迁移 `005_add_agent_results.sql`，持久化每个 Agent 的状态、工具调用次数与执行日志
+
+## 17. v1.8 Harness 控制层与工具治理
+
+### 17.1 Why
+当前系统依赖 LangChainGo 的 AgentExecutor，缺乏统一的执行控制。导致：1) 工具调用超时无法全局干预；2) Agent 产生死循环（路径震荡）时只能等 max_iterations 耗尽；3) 无法区分“审查完成且无发现”和“Agent 崩溃未执行”。
+
+### 17.2 Requirements
+**FR-48: Harness 统一接口**
+系统必须实现 `Harness` 接口，包装所有的 Agent 执行过程，输入 `ReviewInput`，输出结构化的 `AgentResult`。
+
+**FR-49: 结构化结果与完成门禁**
+`AgentResult` 必须包含 `Status` (completed / failed / partial)、`Findings`、`ToolCallCount` 和 `ErrorReason`。
+**门禁规则**：如果 `Status == completed` 但 `ToolCallCount == 0`，系统必须将其降级为 `partial`，并在最终报告中标记“该维度审查存疑”。
+
+**FR-50: 工具调用五阶段容错**
+在 Harness 中拦截工具执行：
+- 校验 (Validate)：工具参数格式与权限。
+- 执行 (Execute)：超时控制。
+- 确认 (Confirm)：对只读工具超时，允许进行最多 2 次指数退避重试。
+- 记录 (Record)：记录每次工具的 `指纹` (ToolName + Hash(Args))。
+
+**FR-51: 路径震荡检测**
+如果连续 3 次工具调用的指纹完全一致，或出现 A→B→A 的交替调用超过 2 轮，Harness 必须抛出 `ErrOscillation`，中断该 Agent 并标记为 `failed`。
+
+### 17.3 Interface Freeze Declaration
+```go
+type AgentStatus string
+
+const (
+	StatusCompleted AgentStatus = "completed"
+	StatusFailed    AgentStatus = "failed"
+	StatusPartial   AgentStatus = "partial"
+)
+
+type AgentResult struct {
+	Status        AgentStatus
+	Findings      []AgentFinding
+	ToolCallCount int
+	ErrorReason   string
+	ExecutionLogs []ToolLog // 记录所有工具调用指纹
+}
+
+type ToolLog struct {
+	ToolName  string
+	ArgsHash  string
+	Timestamp time.Time
+	Success   bool
+}
+
+type Harness interface {
+	Execute(ctx context.Context, agent ReviewAgent, input ReviewInput) (AgentResult, error)
+}
+```
+
+### 17.4 Edge Cases
+- 当发生震荡被中断时，必须保留中断前的 Findings，并附带 `partial` 状态。
+- Harness 产生的日志需要异步写入数据库，以便排查执行差异。

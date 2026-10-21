@@ -627,3 +627,43 @@ T10 + T11 + T12 → T13 → T14
 - **依赖**：T47
 - **预估**：1h
 - **状态**：✅ 已完成
+
+## 阶段十一：v1.8 Harness 控制层（T49-T53）
+
+### T49: AgentResult 与 Harness 接口定义
+- **描述**：在 `internal/harness/` 下定义 `AgentResult`、`AgentStatus` 和 `Harness` 接口。
+- **文件路径**：`internal/harness/types.go`
+- **完成标准**：`go build ./...` 通过。
+- **依赖**：T1
+- **预估**：1h
+- **状态**：✅ 已完成
+
+### T50: 工具指纹与震荡检测器实现
+- **描述**：实现一个循环检测器。接收 ToolLog 列表，如果发现连续 3 个相同的指纹，或 A→B→A→B 模式，返回 `ErrOscillation`。
+- **文件路径**：`internal/harness/oscillation.go`, `oscillation_test.go`
+- **完成标准**：单元测试覆盖连续重复和交替重复场景。
+- **依赖**：T49
+- **预估**：2h
+- **状态**：✅ 已完成
+
+### T51: Harness 执行器实现
+- **描述**：实现 `Harness` 接口。在循环中调用 `agent.Review`。如果发生震荡或超过时间限制（Context 超时），捕获错误并返回 `StatusFailed`。最后执行“完成门禁”校验（检查 ToolCallCount）。
+- **文件路径**：`internal/harness/harness_impl.go`, `harness_test.go`
+- **完成标准**：测试当 ToolCallCount==0 时，状态被强制降级为 Partial。
+- **依赖**：T50
+- **预估**：4h
+- **状态**：✅ 已完成
+
+### T52: Orchestrator 集成与 API 改造
+- **描述**：在 `orchestrator.go` 中，用 Harness 替换直接调用 Agent。收集所有 Agent 的 `AgentResult`，只有 `completed` 和 `partial` 的结果进入下游验证。`failed` 的结果记录到数据库并在最终 Markdown 中报警。
+- **文件路径**：`internal/orchestrator/orchestrator.go`, `internal/repository/review_repo.go`
+- **完成标准**：端到端测试，模拟一个 Agent 返回 failed，验证流程不崩溃且 DB 有记录。
+- **依赖**：T51
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T53: v1.8 集成测试与交付
+- **描述**：更新 CHANGELOG、checklist。提示打 tag。
+- **依赖**：T52
+- **预估**：1h
+- **状态**：✅ 已完成

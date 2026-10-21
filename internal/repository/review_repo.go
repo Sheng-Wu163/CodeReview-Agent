@@ -27,8 +27,11 @@ type Review struct {
 	// adaptive strategy (v1.2 FR-37 / AC-77), e.g.
 	// {"logic":"skipped_by_strategy"}.
 	AgentStatus string
-	CreatedAt   time.Time
-	UpdatedAt   *time.Time
+	// AgentResults holds the serialized structured Harness results of every
+	// executed agent, including tool-call fingerprints (v1.8 FR-49 / 17.4).
+	AgentResults string
+	CreatedAt    time.Time
+	UpdatedAt    *time.Time
 }
 
 // Finding is a single issue reported by a review agent.
@@ -105,6 +108,22 @@ func (r *ReviewRepo) UpdateReviewAgentStatus(ctx context.Context, id int64, stat
 	return nil
 }
 
+// UpdateReviewAgentResults stores the serialized structured Harness results
+// (status, tool calls, execution logs) as JSON (v1.8 FR-49 / 17.4 / T52).
+func (r *ReviewRepo) UpdateReviewAgentResults(ctx context.Context, id int64, results string) error {
+	if results == "" {
+		results = "{}"
+	}
+	if _, err := r.pool.Exec(ctx, `
+		UPDATE reviews SET agent_results = $2::jsonb
+		WHERE id = $1`,
+		id, results,
+	); err != nil {
+		return fmt.Errorf("update review agent_results: %w", err)
+	}
+	return nil
+}
+
 // UpdateReviewStatus sets the status (and optionally the summary) of a
 // review. Pass summary as nil to leave it unchanged.
 func (r *ReviewRepo) UpdateReviewStatus(ctx context.Context, id int64, status, summary *string) error {
@@ -127,10 +146,12 @@ func (r *ReviewRepo) GetReview(ctx context.Context, id int64) (*Review, error) {
 	var updatedAt *time.Time
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, repo_full_name, pr_number, head_sha, status, summary,
-		       COALESCE(pre_findings::text, ''), COALESCE(agent_status::text, ''), created_at, updated_at
+		       COALESCE(pre_findings::text, ''), COALESCE(agent_status::text, ''),
+		       COALESCE(agent_results::text, ''), created_at, updated_at
 		FROM reviews WHERE id = $1`, id,
 	).Scan(&rev.ID, &rev.RepoFullName, &rev.PRNumber, &rev.HeadSHA,
-		&rev.Status, &rev.Summary, &rev.PreFindings, &rev.AgentStatus, &rev.CreatedAt, &updatedAt)
+		&rev.Status, &rev.Summary, &rev.PreFindings, &rev.AgentStatus,
+		&rev.AgentResults, &rev.CreatedAt, &updatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, err
@@ -146,7 +167,8 @@ func (r *ReviewRepo) GetReview(ctx context.Context, id int64) (*Review, error) {
 func (r *ReviewRepo) ListReviews(ctx context.Context, limit int) ([]Review, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, repo_full_name, pr_number, head_sha, status, summary,
-		       COALESCE(pre_findings::text, ''), COALESCE(agent_status::text, ''), created_at, updated_at
+		       COALESCE(pre_findings::text, ''), COALESCE(agent_status::text, ''),
+		       COALESCE(agent_results::text, ''), created_at, updated_at
 		FROM reviews ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list reviews: %w", err)
@@ -158,7 +180,8 @@ func (r *ReviewRepo) ListReviews(ctx context.Context, limit int) ([]Review, erro
 		var rev Review
 		var updatedAt *time.Time
 		if err := rows.Scan(&rev.ID, &rev.RepoFullName, &rev.PRNumber, &rev.HeadSHA,
-			&rev.Status, &rev.Summary, &rev.PreFindings, &rev.AgentStatus, &rev.CreatedAt, &updatedAt); err != nil {
+			&rev.Status, &rev.Summary, &rev.PreFindings, &rev.AgentStatus,
+			&rev.AgentResults, &rev.CreatedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan review row: %w", err)
 		}
 		rev.UpdatedAt = updatedAt

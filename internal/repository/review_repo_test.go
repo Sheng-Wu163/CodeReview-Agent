@@ -379,6 +379,37 @@ func TestUpdateReviewAgentStatus(t *testing.T) {
 	}
 }
 
+func TestUpdateReviewAgentResults(t *testing.T) {
+	repo, cleanup := newTestRepo(t)
+	defer cleanup()
+	ctx := context.Background()
+	truncateReviews(t, repo)
+
+	id, err := repo.CreateReview(ctx, &Review{
+		RepoFullName: "p/q", PRNumber: 5, HeadSHA: "sha-5", Status: "pending",
+	})
+	if err != nil {
+		t.Fatalf("CreateReview: %v", err)
+	}
+
+	results := `{"security":{"status":"failed","tool_call_count":0,"error_reason":"timeout"}}`
+	if err := repo.UpdateReviewAgentResults(ctx, id, results); err != nil {
+		t.Fatalf("UpdateReviewAgentResults: %v", err)
+	}
+
+	got, err := repo.GetReview(ctx, id)
+	if err != nil {
+		t.Fatalf("GetReview: %v", err)
+	}
+	var parsed map[string]map[string]any
+	if err := json.Unmarshal([]byte(got.AgentResults), &parsed); err != nil {
+		t.Fatalf("unmarshal AgentResults %q: %v", got.AgentResults, err)
+	}
+	if parsed["security"]["status"] != "failed" {
+		t.Errorf("agent_results[security].status = %v, want failed", parsed["security"]["status"])
+	}
+}
+
 func TestUpdateReviewStatus(t *testing.T) {
 	repo, closeDB := newTestRepo(t)
 	defer closeDB()

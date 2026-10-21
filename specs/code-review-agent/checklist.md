@@ -327,3 +327,32 @@
 - [x] 所有 AC-92 ~ AC-100 通过（AC-99 受环境限制，见上文说明）
 - [x] `spec.md` 的 CHANGELOG 已更新
 - [ ] git tag `v1.7-complete` 已打 ← 由用户人工执行
+
+## v1.8 Harness 控制层验收
+
+### 门禁与容错验收
+- [x] AC-101: Given 模拟 Agent 正常返回 findings, When Harness 执行, Then 状态为 `completed` 且 findings 被保留。
+  - ✅ `TestExecuteCompletedWithToolCalls`：一次工具调用 + findings → completed，findings 保留
+- [x] AC-102: Given 模拟 Agent 无任何工具调用且返回空 findings, When Harness 执行, Then 状态被强制标记为 `partial`，ErrorReason 为 `"suspicious_no_tool_calls"`。
+  - ✅ `TestExecuteNoToolCallsDowngradesToPartial`：`ErrorReasonNoToolCalls == "suspicious_no_tool_calls"`
+- [x] AC-103: Given 模拟 Agent 执行超时, When Harness 执行, Then 状态为 `failed`，并记录超时原因。
+  - ✅ `TestExecuteTimeoutFails`：ErrorReason 以 `timeout:` 开头
+
+### 震荡检测验收
+- [x] AC-104: Given 模拟 Agent 连续 3 次调用 `read_file("main.go")`, When Harness 运行, Then 立即抛出 `ErrOscillation` 中断执行。
+  - ✅ `TestExecuteInterruptsRepeatedFingerprint` + `TestDetectOscillation`
+- [x] AC-105: Given 模拟 Agent 循环执行 A(`search("x")`) -> B(`read("y")`) -> A -> B, When Harness 运行, Then 中断执行。
+  - ✅ `TestExecuteInterruptsAlternatingFingerprint`（A-B-A-B 两轮）
+
+### 编排集成验收
+- [x] AC-106: Given 四个并行 Agent 中，安全 Agent 返回 `failed`，其余返回 `completed`, When 流程结束, Then 数据库记录安全 Agent 失败，最终 Review 评论中提示“安全审查未完成”。
+  - ✅ `TestPipelineRecordsFailedAgentAndWarns`：`reviews.agent_results` 记录 security failed，Review 摘要包含“安全审查未完成”；`TestUpdateReviewAgentResults` 覆盖真实 DB 列；`TestSubmitFindingsReviewWithWarnings` 覆盖 GitHub 评论 body
+
+## v1.8 迭代交付清单
+
+- [x] AC-101 ~ AC-106 全部通过
+- [x] `go build ./...` 通过
+- [x] `go test ./...` 通过（本机无 gcc，`-race` 需在具备 cgo 的环境补充执行）
+- [x] `spec.md` 的 CHANGELOG 已追加 v1.8
+- [x] `tasks.md` 中 T49 ~ T53 已标记完成
+- [ ] git tag `v1.8-complete` 已打 ← 由用户人工执行

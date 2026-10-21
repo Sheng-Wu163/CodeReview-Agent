@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"codereviewagent/internal/ai/agents"
 	itools "codereviewagent/internal/ai/tools"
 	"codereviewagent/internal/repository"
+	"codereviewagent/internal/review"
 )
 
 // mockGitHub implements GitHubAPI, recording all calls.
@@ -38,6 +40,15 @@ func (m *mockGitHub) SubmitFindingsReview(_ context.Context, _, _ string, _ int,
 	defer m.mu.Unlock()
 	m.reviews = append(m.reviews, map[string]any{
 		"kind": "findings", "count": len(findings), "findings": findings,
+	})
+	return "COMMENT", nil
+}
+
+func (m *mockGitHub) SubmitFindingsReviewWithWarnings(_ context.Context, _, _ string, _ int, _ string, findings []agents.VerifiedFinding, warnings []string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reviews = append(m.reviews, map[string]any{
+		"kind": "findings", "count": len(findings), "findings": findings, "warnings": warnings,
 	})
 	return "COMMENT", nil
 }
@@ -131,6 +142,17 @@ func (m *mockStore) UpdateReviewAgentStatus(_ context.Context, id int64, status 
 	return nil
 }
 
+func (m *mockStore) UpdateReviewAgentResults(_ context.Context, id int64, results string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rev := m.reviews[id]
+	if rev == nil {
+		return fmt.Errorf("review %d not found", id)
+	}
+	rev.AgentResults = results
+	return nil
+}
+
 func (m *mockStore) CreateFinding(_ context.Context, f *repository.Finding) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -185,8 +207,9 @@ index 83db48f..2c47bf9 100644
 func newTestPipeline(t *testing.T, gh *mockGitHub, store *mockStore, findings *[]agents.AgentFinding) *Pipeline {
 	t.Helper()
 
-	// One scripted agent reporting the injected findings.
-	agent := &mockAgent{name: "security", findings: *findings}
+	// One scripted agent reporting the injected findings. It performs one
+	// read_file call so the Harness completion gate accepts it as completed.
+	agent := &mockAgent{name: "security", findings: *findings, useTools: true, toolInput: "users.go"}
 
 	// Orchestrator with a real verifier bound to each run's workspace root
 	// (which is the cloned local repo in tests).
@@ -285,6 +308,59 @@ func TestPipelineDiffErrorFailsReview(t *testing.T) {
 	gh.mu.Unlock()
 	if len(st) != 1 || st[0][0] != "failure" {
 		t.Errorf("statuses = %v, want failure", st)
+	}
+}
+
+func TestPipelineRecordsFailedAgentAndWarns(t *testing.T) {
+	repoDir, commitSHA := buildLocalRepo(t)
+
+	gh := &mockGitHub{diff: testDiff}
+	store := newMockStore()
+	failing := &mockAgent{name: "security", err: fmt.Errorf("llm timeout")}
+	healthy := &mockAgent{
+		name:      "logic",
+		findings:  []agents.AgentFinding{finding("logic", agents.SeverityWarning, "unhandled error")},
+		useTools:  true,
+		toolInput: "users.go",
+	}
+	o := New(zap.NewNop(), "", []agents.ReviewAgent{failing, healthy},
+		func(root string) Verifier { return agents.NewVerifier(itools.ReadFileTool{Root: root}, nil) }, nil)
+	o.SetReviewStrategy(fixedAssessor{level: review.ComplexityStandard}, review.NewSelector())
+
+	p := NewPipeline(o, gh, store, "fake-token", zap.NewNop())
+	p.SetCloneURL(repoDir)
+	p.Process(context.Background(), EventInput{RepoFullName: "o/r", PRNumber: 1, HeadSHA: commitSHA})
+
+	// The failed agent is persisted with its structured result (T52).
+	store.mu.Lock()
+	rev := store.reviews[1]
+	store.mu.Unlock()
+	if rev == nil {
+		t.Fatal("review record not created")
+	}
+	var results map[string]map[string]any
+	if err := json.Unmarshal([]byte(rev.AgentResults), &results); err != nil {
+		t.Fatalf("unmarshal AgentResults %q: %v", rev.AgentResults, err)
+	}
+	if results["security"]["status"] != "failed" {
+		t.Errorf("security status = %v, want failed", results["security"]["status"])
+	}
+
+	// The review body warns that the security dimension did not complete
+	// (AC-106), and the pipeline still completes.
+	gh.mu.Lock()
+	last := gh.reviews[len(gh.reviews)-1]
+	gh.mu.Unlock()
+	if last["kind"] != "findings" {
+		t.Errorf("review kind = %v, want findings with warnings", last["kind"])
+	}
+	warnings, _ := last["warnings"].([]string)
+	joined := strings.Join(warnings, "\n")
+	if !strings.Contains(joined, "安全审查未完成") {
+		t.Errorf("warnings = %q, want 安全审查未完成", joined)
+	}
+	if rev.Status != "completed" {
+		t.Errorf("review status = %q, want completed", rev.Status)
 	}
 }
 

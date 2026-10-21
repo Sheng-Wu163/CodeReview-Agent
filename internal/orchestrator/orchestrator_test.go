@@ -28,12 +28,16 @@ func nopLogger(t *testing.T) *zap.Logger {
 	return zap.NewNop()
 }
 
-// mockAgent is a scripted ReviewAgent for orchestrator tests.
+// mockAgent is a scripted ReviewAgent for orchestrator tests. When useTools
+// is set it performs one tool call so the v1.8 completion gate marks it
+// completed instead of partial.
 type mockAgent struct {
-	name     string
-	findings []agents.AgentFinding
-	err      error
-	delay    time.Duration
+	name      string
+	findings  []agents.AgentFinding
+	err       error
+	delay     time.Duration
+	useTools  bool
+	toolInput string
 
 	mu    sync.Mutex
 	calls int
@@ -41,12 +45,17 @@ type mockAgent struct {
 
 func (m *mockAgent) Name() string { return m.name }
 
-func (m *mockAgent) Review(_ context.Context, _ agents.ReviewInput) ([]agents.AgentFinding, error) {
+func (m *mockAgent) Review(ctx context.Context, input agents.ReviewInput) ([]agents.AgentFinding, error) {
 	m.mu.Lock()
 	m.calls++
 	m.mu.Unlock()
 	if m.delay > 0 {
 		time.Sleep(m.delay)
+	}
+	if m.useTools && len(input.Tools) > 0 {
+		if _, err := input.Tools[0].Call(ctx, m.toolInput); err != nil {
+			return nil, err
+		}
 	}
 	return m.findings, m.err
 }

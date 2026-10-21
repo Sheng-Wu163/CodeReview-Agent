@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"go.uber.org/zap"
@@ -18,6 +19,9 @@ import (
 type GitHubAPI interface {
 	GetPRDiff(ctx context.Context, owner, repo string, number int) (string, error)
 	SubmitFindingsReview(ctx context.Context, owner, repo string, number int, commitSHA string, findings []agents.VerifiedFinding) (string, error)
+	// SubmitFindingsReviewWithWarnings posts the findings review with the
+	// v1.8 Harness warnings appended to the summary (FR-49 / AC-106).
+	SubmitFindingsReviewWithWarnings(ctx context.Context, owner, repo string, number int, commitSHA string, findings []agents.VerifiedFinding, warnings []string) (string, error)
 	SubmitLGTMReview(ctx context.Context, owner, repo string, number int, commitSHA string) error
 	SubmitNoMeaningfulChangesReview(ctx context.Context, owner, repo string, number int, commitSHA string) error
 	UpdateCommitStatus(ctx context.Context, owner, repo, sha, state, description string) error
@@ -34,6 +38,9 @@ type ReviewStore interface {
 	// UpdateReviewAgentStatus persists the per-agent outcome map of the
 	// adaptive strategy (v1.2 FR-37 / AC-77).
 	UpdateReviewAgentStatus(ctx context.Context, id int64, status map[string]string) error
+	// UpdateReviewAgentResults persists the serialized structured Harness
+	// results of every executed agent (v1.8 FR-49 / 17.4 / T52).
+	UpdateReviewAgentResults(ctx context.Context, id int64, results string) error
 	CreateFinding(ctx context.Context, f *repository.Finding) (int64, error)
 }
 
@@ -139,6 +146,17 @@ func (p *Pipeline) Process(ctx context.Context, ev EventInput) {
 		}
 	}
 
+	// Persist the structured Harness results, including failed agents and
+	// their tool-call fingerprints (v1.8 FR-49 / 17.4 / T52).
+	if len(res.AgentResults) > 0 {
+		data, err := json.Marshal(res.AgentResults)
+		if err != nil {
+			log.Errorw("marshal agent results", "error", err)
+		} else if err := p.store.UpdateReviewAgentResults(ctx, reviewID, string(data)); err != nil {
+			log.Errorw("persist agent results", "error", err)
+		}
+	}
+
 	// Persist findings (FR-14).
 	for _, f := range res.Findings {
 		if _, err := p.store.CreateFinding(ctx, &repository.Finding{
@@ -155,10 +173,15 @@ func (p *Pipeline) Process(ctx context.Context, ev EventInput) {
 		}
 	}
 
-	// GitHub Review (FR-12 / AC-15 / AC-17 / AC-21).
+	// GitHub Review (FR-12 / AC-15 / AC-17 / AC-21). Failed and partial
+	// Harness outcomes are surfaced in the review body (v1.8 FR-49 /
+	// AC-106).
+	warnings := res.AgentWarnings()
 	switch {
 	case res.NoMeaningfulChanges:
 		err = p.gh.SubmitNoMeaningfulChangesReview(ctx, owner, repoName, ev.PRNumber, ev.HeadSHA)
+	case len(warnings) > 0:
+		_, err = p.gh.SubmitFindingsReviewWithWarnings(ctx, owner, repoName, ev.PRNumber, ev.HeadSHA, res.Findings, warnings)
 	case len(res.Findings) == 0:
 		err = p.gh.SubmitLGTMReview(ctx, owner, repoName, ev.PRNumber, ev.HeadSHA)
 	default:

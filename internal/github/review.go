@@ -131,6 +131,43 @@ func (c *Client) SubmitFindingsReview(ctx context.Context, owner, repo string, n
 	return event, nil
 }
 
+// BuildSummaryWithWarnings renders the review summary body with the v1.8
+// Harness warnings appended (failed / partial agents, FR-49).
+func BuildSummaryWithWarnings(findings []agents.VerifiedFinding, warnings []string) string {
+	summary := BuildSummary(findings)
+	if len(warnings) == 0 {
+		return summary
+	}
+	return summary + "\n\n" + strings.Join(warnings, "\n")
+}
+
+// SubmitFindingsReviewWithWarnings submits a findings review whose summary
+// also carries the Harness warnings (v1.8 FR-49 / T52 / AC-106). When no
+// findings exist it still posts a review so the warning reaches the
+// developer.
+func (c *Client) SubmitFindingsReviewWithWarnings(ctx context.Context, owner, repo string, number int, commitSHA string, findings []agents.VerifiedFinding, warnings []string) (string, error) {
+	event := reviewEventComment
+	if HasCritical(findings) {
+		event = reviewEventRequestChanges
+	}
+	req := &gogithub.PullRequestReviewRequest{
+		CommitID: gogithub.String(commitSHA),
+		Body:     gogithub.String(BuildSummaryWithWarnings(findings, warnings)),
+		Event:    gogithub.String(event),
+	}
+	for _, cm := range BuildInlineComments(findings) {
+		req.Comments = append(req.Comments, &gogithub.DraftReviewComment{
+			Path: gogithub.String(cm.Path),
+			Line: gogithub.Int(cm.Line),
+			Body: gogithub.String(cm.Body),
+		})
+	}
+	if _, _, err := c.api.PullRequests.CreateReview(ctx, owner, repo, number, req); err != nil {
+		return "", fmt.Errorf("create review %s/%s#%d: %w", owner, repo, number, err)
+	}
+	return event, nil
+}
+
 // SubmitLGTMReview posts the "LGTM" review used when no issues were found
 // (spec edge case; AC-17).
 func (c *Client) SubmitLGTMReview(ctx context.Context, owner, repo string, number int, commitSHA string) error {

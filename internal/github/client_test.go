@@ -225,6 +225,31 @@ func TestSubmitLGTMReview(t *testing.T) {
 	}
 }
 
+func TestSubmitFindingsReviewWithWarnings(t *testing.T) {
+	state := &mockServerState{}
+	c := newMockClient(t, state)
+
+	warnings := []string{"⚠️ 安全审查未完成（security: failed - timeout）"}
+	event, err := c.SubmitFindingsReviewWithWarnings(
+		context.Background(), "o", "r", 1, "sha-abc", nil, warnings)
+	if err != nil {
+		t.Fatalf("SubmitFindingsReviewWithWarnings: %v", err)
+	}
+	if event != reviewEventComment {
+		t.Errorf("event = %q, want COMMENT", event)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.reviews) != 1 {
+		t.Fatalf("reviews = %d, want 1", len(state.reviews))
+	}
+	body, _ := state.reviews[0]["body"].(string)
+	if !strings.Contains(body, "安全审查未完成") {
+		t.Errorf("body = %q, want security warning (AC-106)", body)
+	}
+}
+
 func TestUpdateCommitStatus(t *testing.T) {
 	state := &mockServerState{}
 	c := newMockClient(t, state)

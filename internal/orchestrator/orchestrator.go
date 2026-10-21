@@ -23,6 +23,7 @@ import (
 	"codereviewagent/internal/config"
 	ctxcontext "codereviewagent/internal/context"
 	"codereviewagent/internal/diff"
+	"codereviewagent/internal/harness"
 	"codereviewagent/internal/review"
 )
 
@@ -115,11 +116,55 @@ type Result struct {
 	// AgentStatus maps every configured agent to its outcome: "executed",
 	// "skipped_by_strategy" (v1.2 FR-37) or "failed".
 	AgentStatus map[string]string
+	// AgentResults holds the structured Harness outcome of every executed
+	// agent (v1.8 FR-49), including tool-call logs.
+	AgentResults map[string]harness.AgentResult
 	// NoMeaningfulChanges is true when the diff contained no code changes
 	// (spec edge case: comment-only or whitespace-only diffs).
 	NoMeaningfulChanges bool
 	// Duration is the total wall time of the run (NFR-04 observability).
 	Duration time.Duration
+}
+
+// agentDisplayNames maps agent identifiers to the Chinese labels used in
+// user-facing warnings.
+var agentDisplayNames = map[string]string{
+	"security":    "安全",
+	"logic":       "逻辑",
+	"performance": "性能",
+	"lint":        "规范",
+}
+
+// AgentWarnings renders the Harness outcomes of failed and partial agents as
+// user-facing warning lines (FR-49, AC-106). The result is deterministic:
+// agents are visited in sorted order.
+func (r *Result) AgentWarnings() []string {
+	if len(r.AgentResults) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(r.AgentResults))
+	for name := range r.AgentResults {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	warnings := make([]string, 0, len(names))
+	for _, name := range names {
+		result := r.AgentResults[name]
+		label := agentDisplayNames[name]
+		if label == "" {
+			label = name
+		}
+		switch result.Status {
+		case harness.StatusFailed:
+			warnings = append(warnings, fmt.Sprintf(
+				"⚠️ %s审查未完成（%s: failed - %s）", label, name, result.ErrorReason))
+		case harness.StatusPartial:
+			warnings = append(warnings, fmt.Sprintf(
+				"⚠️ %s审查存疑（%s: partial - %s）", label, name, result.ErrorReason))
+		}
+	}
+	return warnings
 }
 
 // Orchestrator wires the pipeline stages together.
@@ -148,6 +193,9 @@ type Orchestrator struct {
 	// agentTimeout bounds each agent's ReAct loop (AC-22: LLM API calls
 	// exceeding 60s mark that agent as failed without affecting others).
 	agentTimeout time.Duration
+	// runner is the v1.8 Harness control layer wrapping every agent run
+	// (FR-48).
+	runner harness.Harness
 
 	mu       sync.Mutex
 	lastSeen map[string]time.Time // head SHA -> last trigger time (AC-25)
@@ -178,7 +226,16 @@ func New(logger *zap.Logger, root string, reviewAgents []agents.ReviewAgent, ver
 	}
 	o.assessor = review.NewAssessor(review.AssessorOptions{})
 	o.selector = review.NewSelector()
+	o.runner = harness.New(logger, harness.WithTimeout(o.agentTimeout))
 	return o
+}
+
+// SetHarness overrides the v1.8 Harness control layer. Tests inject a mock;
+// production uses the default Executor. Must be called before Run.
+func (o *Orchestrator) SetHarness(h harness.Harness) {
+	if h != nil {
+		o.runner = h
+	}
 }
 
 // SetReviewStrategy overrides the adaptive review strategy components
@@ -250,7 +307,11 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		return nil, err
 	}
 	start := time.Now()
-	res := &Result{Input: in, AgentErrors: make(map[string]string)}
+	res := &Result{
+		Input:        in,
+		AgentErrors:  make(map[string]string),
+		AgentResults: make(map[string]harness.AgentResult),
+	}
 
 	// Step 2: parse the diff.
 	files, err := diff.Parse(in.DiffText)
@@ -422,17 +483,35 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 			// event stream under this agent's name (v1.7 FR-44).
 			agentRunInput := agentInput
 			agentRunInput.Tools = wrapTools(agentInput.Tools, agent.Name(), emit)
-			fnd, err := o.runAgent(ctx, agent, agentRunInput)
+			result, err := o.runAgent(ctx, agent, agentRunInput)
 			mu.Lock()
 			defer mu.Unlock()
+			res.AgentResults[agent.Name()] = result
 			if err != nil {
-				res.AgentErrors[agent.Name()] = err.Error()
-				res.AgentStatus[agent.Name()] = "failed"
+				reason := result.ErrorReason
+				if reason == "" {
+					reason = err.Error()
+				}
+				res.AgentErrors[agent.Name()] = reason
 				o.logger.Sugar().Errorw("review agent failed",
 					"agent", agent.Name(), "error", err,
+					"status", result.Status,
 					"elapsed", time.Since(agentStart))
+			}
+			// Failed results never reach downstream verification (T52). A
+			// partial result interrupted after producing findings is still
+			// usable and is preserved (spec 17.4).
+			if result.Status == harness.StatusFailed {
+				res.AgentStatus[agent.Name()] = "failed"
 				return nil // do not fail the group
 			}
+			res.AgentStatus[agent.Name()] = "executed"
+			if result.Status == harness.StatusPartial {
+				o.logger.Sugar().Warnw("review agent result is partial",
+					"agent", agent.Name(), "reason", result.ErrorReason,
+					"tool_calls", result.ToolCallCount)
+			}
+			fnd := result.Findings
 			rawFindings = append(rawFindings, fnd...)
 			for _, f := range fnd {
 				data, err := json.Marshal(f)
@@ -486,21 +565,31 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		"final_findings", len(res.Findings),
 		"agent_errors", len(res.AgentErrors),
 		"duration", res.Duration)
+	warnings := res.AgentWarnings()
 	emit(ReviewEvent{Event: EventDone, Data: map[string]any{
 		"findings":    len(res.Findings),
 		"duration_ms": res.Duration.Milliseconds(),
-		"markdown":    finalMarkdown(res.Findings),
+		"markdown":    finalMarkdown(res.Findings, warnings),
+		"warnings":    warnings,
 	}})
 	return res, nil
 }
 
 // finalMarkdown renders the verified findings as a compact markdown report
-// for the SSE review stream (v1.7 FR-44 done event).
-func finalMarkdown(findings []agents.VerifiedFinding) string {
-	if len(findings) == 0 {
-		return "LGTM ✅（未发现问题）"
-	}
+// for the SSE review stream (v1.7 FR-44 done event). Agent warnings from the
+// v1.8 Harness (failed / partial) are rendered first (FR-49).
+func finalMarkdown(findings []agents.VerifiedFinding, warnings []string) string {
 	var b strings.Builder
+	if len(warnings) > 0 {
+		for _, warning := range warnings {
+			fmt.Fprintf(&b, "> %s\n", warning)
+		}
+		b.WriteString("\n")
+	}
+	if len(findings) == 0 {
+		b.WriteString("LGTM ✅（未发现问题）")
+		return b.String()
+	}
 	fmt.Fprintf(&b, "## 审查结果（%d 条发现）\n\n", len(findings))
 	for _, f := range findings {
 		fmt.Fprintf(&b, "### %s `%s:%d`\n\n", strings.ToUpper(f.Severity), f.FilePath, f.LineNumber)
@@ -517,11 +606,15 @@ func finalMarkdown(findings []agents.VerifiedFinding) string {
 	return b.String()
 }
 
-// runAgent executes one agent under its own timeout (AC-22).
-func (o *Orchestrator) runAgent(ctx context.Context, a agents.ReviewAgent, input agents.ReviewInput) ([]agents.AgentFinding, error) {
-	runCtx, cancel := context.WithTimeout(ctx, o.agentTimeout)
-	defer cancel()
-	return a.Review(runCtx, input)
+// runAgent executes one agent through the Harness control layer (AC-22,
+// FR-48). The Harness applies the per-agent timeout, retry policy and
+// oscillation detection and decides the final status.
+func (o *Orchestrator) runAgent(ctx context.Context, a agents.ReviewAgent, input agents.ReviewInput) (harness.AgentResult, error) {
+	runner := o.runner
+	if runner == nil {
+		runner = harness.New(o.logger, harness.WithTimeout(o.agentTimeout))
+	}
+	return runner.Execute(ctx, a, input)
 }
 
 // buildTools creates the context-collection tool set for the review agents,
