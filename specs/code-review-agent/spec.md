@@ -877,3 +877,41 @@ type CompressionConfig struct {
 | PR 一进来 Diff 就超过 32K | 触发压缩，但由于 Diff 是 Pinned，不对其压缩。对后续工具输出严格限制。如果此时已无法分配给工具，直接返回 `failed_context_overflow` 警告。 |
 | `search_code` 返回 500 个结果 | 在工具层直接截断前 20 个结果，并在前端提示“匹配过多，建议更精确的关键词”。 |
 | 压缩后依然超过绝对水位 | 强制丢弃倒数第 3 轮及以前的所有 `TOOL_OUTPUT`，替换为极简的摘要（“曾读取过 X 文件”）。 |
+
+## 19. v1.8.1 Checkpoint 断点续传机制
+
+### 19.1 Why
+当前 Harness 实现了超时隔离，但未能实现状态保存。在多 Agent 并行审查中，如果部分 Agent 完成而另一部分因网络抖动失败，整体重试会导致已完成 Agent 的 Token 浪费和重复审查延迟。引入基于数据库的轻量级 Checkpoint 机制，确保审查任务可恢复。
+
+### 19.2 Requirements
+
+**FR-57: Checkpoint 持久化模型**
+系统必须新增 `harness_checkpoints` 表，字段包括：`id`, `repo_full_name`, `pr_number`, `head_sha`, `agent_name`, `status`, `result_json`, `created_at`。唯一约束为 `(head_sha, agent_name)`。
+
+**FR-58: 幂等执行与状态恢复**
+Orchestrator 在触发某一 Agent 执行前，必须查询 Checkpoint。如果命中且状态为 `success` 或 `failed`（且未配置强制重跑），则直接加载 `result_json` 作为结果，跳过 LLM 调用。
+
+**FR-59: 执行后立即落盘**
+Harness 在 Agent 执行完毕（无论成功或失败）后，必须**立即**将 `AgentResult` 序列化并 Upsert 到数据库。不能等到全部流程结束再统一落盘。
+
+**FR-60: 强制重跑控制**
+当 Agent 的 Prompt 模板发生改变，或开发者手动触发时，系统必须支持通过配置或 API 参数 `force_rerun=true`，忽略现有 Checkpoint 并重新执行。
+
+### 19.3 Interface Freeze Declaration
+```go
+type Checkpoint struct {
+	ID           int       `json:"id"`
+	RepoFullName string    `json:"repo_full_name"`
+	PRNumber     int       `json:"pr_number"`
+	HeadSHA      string    `json:"head_sha"`
+	AgentName    string    `json:"agent_name"`
+	Status       string    `json:"status"` // "success" | "failed"
+	ResultJSON   []byte    `json:"result_json"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type CheckpointRepository interface {
+	Save(ctx context.Context, cp *Checkpoint) error
+	GetBySHAAndAgent(ctx context.Context, sha string, agent string) (*Checkpoint, error)
+}
+```

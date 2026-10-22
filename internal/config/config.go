@@ -34,6 +34,11 @@ type Config struct {
 	// Compression configures the v1.9 context assembly and memory
 	// compression pipeline (FR-52..FR-55).
 	Compression CompressionConfig `mapstructure:"compression"`
+	// ForceRerun ignores all stored agent checkpoints (v1.8.1 FR-60).
+	ForceRerun bool `mapstructure:"force_rerun"`
+	// ForceRerunAgents lists agents whose checkpoints must be ignored even
+	// when ForceRerun is false (v1.8.1 FR-60).
+	ForceRerunAgents []string `mapstructure:"force_rerun_agents"`
 }
 
 // CompressionConfig holds the v1.9 dual-track compression thresholds and
@@ -181,6 +186,8 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("compression.keep_recent_rounds", 2)
 	v.SetDefault("compression.tool_output_hard_limit", 10000)
 	v.SetDefault("compression.model_context_window", 128000)
+	v.SetDefault("force_rerun", false)
+	v.SetDefault("force_rerun_agents", []string{})
 
 	// Environment variable bindings. BindEnv ensures that Unmarshal picks up
 	// environment values even for keys that are absent from the YAML file.

@@ -19,6 +19,8 @@ import (
 	itools "codereviewagent/internal/ai/tools"
 	ctxcontext "codereviewagent/internal/context"
 	"codereviewagent/internal/diff"
+	"codereviewagent/internal/harness"
+	"codereviewagent/internal/repository"
 	"codereviewagent/internal/review"
 )
 
@@ -70,11 +72,80 @@ func (m *mockAgent) callCount() int {
 type mockVerifier struct {
 	verified []agents.VerifiedFinding
 	calls    int
+	before   func()
 }
 
 func (m *mockVerifier) Verify(_ context.Context, findings []agents.AgentFinding, _ agents.ReviewInput) ([]agents.VerifiedFinding, error) {
 	m.calls++
+	if m.before != nil {
+		m.before()
+	}
 	return m.verified, nil
+}
+
+// passthroughVerifier accepts every raw finding with full confidence.
+type passthroughVerifier struct{}
+
+func (passthroughVerifier) Verify(_ context.Context, findings []agents.AgentFinding, _ agents.ReviewInput) ([]agents.VerifiedFinding, error) {
+	out := make([]agents.VerifiedFinding, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, agents.VerifiedFinding{AgentFinding: f, Confidence: 1})
+	}
+	return out, nil
+}
+
+// mockCheckpointStore is an in-memory CheckpointStore.
+type mockCheckpointStore struct {
+	mu    sync.Mutex
+	items map[string]*repository.Checkpoint
+}
+
+func newMockCheckpointStore() *mockCheckpointStore {
+	return &mockCheckpointStore{items: make(map[string]*repository.Checkpoint)}
+}
+
+func checkpointKey(sha, agent string) string { return sha + "|" + agent }
+
+func (m *mockCheckpointStore) Save(_ context.Context, cp *repository.Checkpoint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := *cp
+	if copied.ID == 0 {
+		copied.ID = len(m.items) + 1
+	}
+	m.items[checkpointKey(cp.HeadSHA, cp.AgentName)] = &copied
+	return nil
+}
+
+func (m *mockCheckpointStore) GetBySHAAndAgent(_ context.Context, sha string, agent string) (*repository.Checkpoint, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp, ok := m.items[checkpointKey(sha, agent)]
+	if !ok {
+		return nil, fmt.Errorf("checkpoint not found")
+	}
+	copied := *cp
+	return &copied, nil
+}
+
+func (m *mockCheckpointStore) seed(t *testing.T, sha, agent, status string, result harness.AgentResult) {
+	t.Helper()
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal checkpoint: %v", err)
+	}
+	if err := m.Save(context.Background(), &repository.Checkpoint{
+		RepoFullName: "a/b", PRNumber: 1, HeadSHA: sha,
+		AgentName: agent, Status: status, ResultJSON: data,
+	}); err != nil {
+		t.Fatalf("seed checkpoint: %v", err)
+	}
+}
+
+func (m *mockCheckpointStore) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.items)
 }
 
 // reviewDiff is a realistic diff with a reviewable file and a vendor file.
@@ -632,5 +703,154 @@ func TestWrapToolsEmitsToolCall(t *testing.T) {
 		}
 	default:
 		t.Fatal("no tool_call event emitted")
+	}
+}
+
+// TestOrchestratorSavesCheckpointsForAllAgents verifies AC-113.
+func TestOrchestratorSavesCheckpointsForAllAgents(t *testing.T) {
+	agts, _ := fourAgents()
+	o := newTestOrchestrator(t, agts, nil)
+	store := newMockCheckpointStore()
+	o.SetCheckpointStore(store)
+
+	if _, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 1, HeadSHA: "checkpoint-all", DiffText: reviewDiff(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := store.count(); got != 4 {
+		t.Fatalf("checkpoints = %d, want 4", got)
+	}
+	for _, name := range []string{"security", "logic", "performance", "lint"} {
+		cp, err := store.GetBySHAAndAgent(context.Background(), "checkpoint-all", name)
+		if err != nil {
+			t.Fatalf("checkpoint %s: %v", name, err)
+		}
+		if cp.Status != "success" {
+			t.Errorf("checkpoint %s status = %q, want success", name, cp.Status)
+		}
+	}
+}
+
+// TestOrchestratorResumesCheckpoints verifies AC-114: successful agents are
+// skipped, failed checkpoints are re-executed.
+func TestOrchestratorResumesCheckpoints(t *testing.T) {
+	agts, byName := fourAgents()
+	o := newTestOrchestrator(t, agts, passthroughVerifier{})
+	store := newMockCheckpointStore()
+	store.seed(t, "resume-sha", "security", "success", harness.AgentResult{
+		Status:        harness.StatusCompleted,
+		Findings:      []agents.AgentFinding{finding("security", "critical", "cached security finding")},
+		ToolCallCount: 1,
+	})
+	store.seed(t, "resume-sha", "logic", "failed", harness.AgentResult{
+		Status:      harness.StatusFailed,
+		ErrorReason: "llm timeout",
+	})
+	o.SetCheckpointStore(store)
+
+	res, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 1, HeadSHA: "resume-sha", DiffText: reviewDiff(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if byName["security"].callCount() != 0 {
+		t.Errorf("security agent calls = %d, want 0 (cached)", byName["security"].callCount())
+	}
+	if byName["logic"].callCount() != 1 {
+		t.Errorf("logic agent calls = %d, want 1 (failed checkpoint retried)", byName["logic"].callCount())
+	}
+	if res.AgentResults["security"].ToolCallCount != 1 {
+		t.Errorf("cached security result not restored: %+v", res.AgentResults["security"])
+	}
+	found := false
+	for _, f := range res.Findings {
+		if f.Message == "cached security finding" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("cached security finding missing from results: %+v", res.Findings)
+	}
+}
+
+// TestOrchestratorForceRerun verifies AC-115.
+func TestOrchestratorForceRerun(t *testing.T) {
+	agts, byName := fourAgents()
+	o := newTestOrchestrator(t, agts, nil)
+	store := newMockCheckpointStore()
+	store.seed(t, "force-sha", "security", "success", harness.AgentResult{
+		Status:        harness.StatusCompleted,
+		ToolCallCount: 1,
+	})
+	o.SetCheckpointStore(store)
+	o.SetCheckpointConfig(true, nil)
+
+	if _, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 1, HeadSHA: "force-sha", DiffText: reviewDiff(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if byName["security"].callCount() != 1 {
+		t.Errorf("security agent calls = %d, want 1 (force rerun)", byName["security"].callCount())
+	}
+}
+
+// TestOrchestratorForceRerunAgents verifies the per-agent force list.
+func TestOrchestratorForceRerunAgents(t *testing.T) {
+	agts, byName := fourAgents()
+	o := newTestOrchestrator(t, agts, nil)
+	store := newMockCheckpointStore()
+	store.seed(t, "force-agent-sha", "security", "success", harness.AgentResult{
+		Status:        harness.StatusCompleted,
+		ToolCallCount: 1,
+	})
+	store.seed(t, "force-agent-sha", "logic", "success", harness.AgentResult{
+		Status:        harness.StatusCompleted,
+		ToolCallCount: 1,
+	})
+	o.SetCheckpointStore(store)
+	o.SetCheckpointConfig(false, []string{"security"})
+
+	if _, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 1, HeadSHA: "force-agent-sha", DiffText: reviewDiff(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if byName["security"].callCount() != 1 {
+		t.Errorf("security calls = %d, want 1 (listed for force rerun)", byName["security"].callCount())
+	}
+	if byName["logic"].callCount() != 0 {
+		t.Errorf("logic calls = %d, want 0 (checkpoint reused)", byName["logic"].callCount())
+	}
+}
+
+// TestOrchestratorCheckpointsPersistBeforeVerification verifies that agent
+// results are written immediately, not at the end of the whole pipeline
+// (FR-59 / AC-116).
+func TestOrchestratorCheckpointsPersistBeforeVerification(t *testing.T) {
+	agts, _ := fourAgents()
+	store := newMockCheckpointStore()
+	verifier := &mockVerifier{
+		verified: []agents.VerifiedFinding{{AgentFinding: finding("security", "critical", "x"), Confidence: 0.9}},
+		before: func() {
+			if got := store.count(); got != 4 {
+				t.Errorf("checkpoints at verification time = %d, want 4", got)
+			}
+		},
+	}
+	o := newTestOrchestrator(t, agts, verifier)
+	o.SetCheckpointStore(store)
+
+	if _, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 1, HeadSHA: "persist-sha", DiffText: reviewDiff(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if verifier.calls != 1 {
+		t.Errorf("verifier calls = %d, want 1", verifier.calls)
 	}
 }

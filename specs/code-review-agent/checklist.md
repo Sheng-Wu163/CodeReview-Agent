@@ -389,3 +389,10 @@
 - [x] `spec.md` 的 CHANGELOG 已追加 v1.9
 - [x] `tasks.md` 中 T54 ~ T58 已标记完成
 - [ ] git tag `v1.9-complete` 已打 ← 由用户人工执行
+
+## v1.8.1 Checkpoint 断点续传验收
+
+- [ ] AC-113: Given 运行了一次审查，4 个 Agent 成功, When 查询数据库, Then `harness_checkpoints` 中有 4 条对应的记录。
+- [ ] AC-114: Given 某次审查中 `security` Agent 超时失败, When 重新触发相同 SHA 的审查, Then Orchestrator 跳过已完成 Agent，且重新执行 `security` Agent（由于状态为 `failed`）。
+- [ ] AC-115: Given 存在完整的 Checkpoint 记录, When 配置 `force_rerun=true` 触发审查, Then 系统忽略 Checkpoint，重新调用所有 Agent。
+- [ ] AC-116: Given 审查中途进程被强制 Kill, When 重新启动并恢复, Then 数据库中存在已执行完毕 Agent 的 Checkpoint，避免重复扣费。

@@ -95,6 +95,8 @@ func run() error {
 		}, nil)
 	orch.SetAnalysisConfig(cfg.StaticAnalysis)
 	orch.SetCompressionConfig(cfg.Compression)
+	orch.SetCheckpointStore(repository.NewCheckpointRepo(pool))
+	orch.SetCheckpointConfig(cfg.ForceRerun, cfg.ForceRerunAgents)
 	orch.SetReviewStrategy(review.NewAssessor(review.AssessorOptions{
 		TrivialMaxLines: cfg.StaticAnalysis.Adaptive.TrivialMaxLines,
 		ComplexMinLines: cfg.StaticAnalysis.Adaptive.ComplexMinLines,

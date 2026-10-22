@@ -24,6 +24,7 @@ import (
 	ctxcontext "codereviewagent/internal/context"
 	"codereviewagent/internal/diff"
 	"codereviewagent/internal/harness"
+	"codereviewagent/internal/repository"
 	"codereviewagent/internal/review"
 )
 
@@ -48,6 +49,16 @@ type Input struct {
 	// WorkspaceRoot is the checked-out workspace the tools operate on.
 	// When empty the orchestrator's default root is used.
 	WorkspaceRoot string
+	// ForceRerun ignores stored checkpoints for this run (v1.8.1 FR-60).
+	ForceRerun bool
+}
+
+// CheckpointStore is the checkpoint persistence surface consumed by the
+// orchestrator (v1.8.1 FR-57..FR-60); repository.CheckpointRepo implements
+// it. Defined in the consumer per project convention.
+type CheckpointStore interface {
+	Save(ctx context.Context, cp *repository.Checkpoint) error
+	GetBySHAAndAgent(ctx context.Context, sha string, agent string) (*repository.Checkpoint, error)
 }
 
 // Verifier is the verification step consumed by the orchestrator. The
@@ -199,6 +210,11 @@ type Orchestrator struct {
 	// runner is the v1.8 Harness control layer wrapping every agent run
 	// (FR-48).
 	runner harness.Harness
+	// checkpoints is the optional v1.8.1 per-agent checkpoint store.
+	checkpoints CheckpointStore
+	// forceRerun and forceRerunAgents control checkpoint reuse (FR-60).
+	forceRerun       bool
+	forceRerunAgents map[string]bool
 
 	mu       sync.Mutex
 	lastSeen map[string]time.Time // head SHA -> last trigger time (AC-25)
@@ -264,6 +280,93 @@ func (o *Orchestrator) SetCompressionConfig(cfg config.CompressionConfig) {
 func (o *Orchestrator) SetHarness(h harness.Harness) {
 	if h != nil {
 		o.runner = h
+	}
+}
+
+// SetCheckpointStore enables v1.8.1 checkpoint reuse and persistence. Pass
+// nil to disable checkpoints (the default). Must be called before Run.
+func (o *Orchestrator) SetCheckpointStore(store CheckpointStore) {
+	o.checkpoints = store
+}
+
+// SetCheckpointConfig configures forced reruns (v1.8.1 FR-60). A global
+// force ignores every checkpoint; forceAgents ignores only the named agents.
+func (o *Orchestrator) SetCheckpointConfig(force bool, forceAgents []string) {
+	o.forceRerun = force
+	o.forceRerunAgents = make(map[string]bool, len(forceAgents))
+	for _, name := range forceAgents {
+		o.forceRerunAgents[name] = true
+	}
+}
+
+// shouldForceRerun reports whether the named agent must ignore its
+// checkpoint for this run.
+func (o *Orchestrator) shouldForceRerun(agentName string, in Input) bool {
+	if o.forceRerun || in.ForceRerun {
+		return true
+	}
+	return o.forceRerunAgents[agentName]
+}
+
+// loadCheckpoints returns cached successful agent results for the head SHA.
+// Failed checkpoints are never reused so the agent is retried (AC-114).
+func (o *Orchestrator) loadCheckpoints(ctx context.Context, in Input, names []string) map[string]harness.AgentResult {
+	if o.checkpoints == nil || in.HeadSHA == "" {
+		return nil
+	}
+	cached := make(map[string]harness.AgentResult)
+	for _, name := range names {
+		if o.shouldForceRerun(name, in) {
+			continue
+		}
+		cp, err := o.checkpoints.GetBySHAAndAgent(ctx, in.HeadSHA, name)
+		if err != nil {
+			// Not found is the common case; any lookup error degrades to a
+			// normal execution instead of failing the review.
+			continue
+		}
+		if cp.Status != "success" {
+			continue
+		}
+		var result harness.AgentResult
+		if err := json.Unmarshal(cp.ResultJSON, &result); err != nil {
+			o.logger.Sugar().Warnw("invalid checkpoint payload, re-running agent",
+				"agent", name, "error", err)
+			continue
+		}
+		cached[name] = result
+	}
+	return cached
+}
+
+// saveCheckpoint persists one agent result immediately after execution
+// (FR-59). The save uses a detached, bounded context so a cancellation of
+// the review does not lose completed work (AC-116).
+func (o *Orchestrator) saveCheckpoint(ctx context.Context, in Input, agentName string, result harness.AgentResult) {
+	if o.checkpoints == nil || in.HeadSHA == "" {
+		return
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		o.logger.Sugar().Warnw("marshal checkpoint result", "agent", agentName, "error", err)
+		return
+	}
+	status := "success"
+	if result.Status == harness.StatusFailed {
+		status = "failed"
+	}
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	cp := &repository.Checkpoint{
+		RepoFullName: in.RepoFullName,
+		PRNumber:     in.PRNumber,
+		HeadSHA:      in.HeadSHA,
+		AgentName:    agentName,
+		Status:       status,
+		ResultJSON:   data,
+	}
+	if err := o.checkpoints.Save(saveCtx, cp); err != nil {
+		o.logger.Sugar().Warnw("save checkpoint", "agent", agentName, "error", err)
 	}
 }
 
@@ -497,12 +600,38 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 	}
 	var mu sync.Mutex
 	rawFindings := make([]agents.AgentFinding, 0)
+
+	// v1.8.1: load successful checkpoints before dispatching agents. Only
+	// completed/partial results were stored as "success"; failed agents are
+	// always retried (FR-58, AC-114).
+	enabledNames := make([]string, 0, len(o.agents))
+	for _, a := range o.agents {
+		if review.IsAgentEnabled(strategy, a.Name()) {
+			enabledNames = append(enabledNames, a.Name())
+		}
+	}
+	cachedResults := o.loadCheckpoints(ctx, in, enabledNames)
+
 	g := new(errgroup.Group)
 	for _, a := range o.agents {
 		agent := a
 		if !review.IsAgentEnabled(strategy, agent.Name()) {
 			o.logger.Sugar().Infow("review agent skipped by strategy",
 				"agent", agent.Name(), "level", strategy.Level)
+			continue
+		}
+		if cached, ok := cachedResults[agent.Name()]; ok {
+			emit(ReviewEvent{Event: EventAgentStart, Data: map[string]any{"agent": agent.Name()}})
+			mu.Lock()
+			res.AgentResults[agent.Name()] = cached
+			res.AgentStatus[agent.Name()] = "executed"
+			rawFindings = append(rawFindings, cached.Findings...)
+			mu.Unlock()
+			o.emitFindings(emit, cached.Findings)
+			o.logger.Sugar().Infow("review agent restored from checkpoint",
+				"agent", agent.Name(),
+				"findings", len(cached.Findings),
+				"head_sha", in.HeadSHA)
 			continue
 		}
 		g.Go(func() error {
@@ -513,6 +642,9 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 			agentRunInput := agentInput
 			agentRunInput.Tools = wrapTools(agentInput.Tools, agent.Name(), emit)
 			result, err := o.runAgent(ctx, agent, agentRunInput)
+			// FR-59: persist the result immediately after this agent
+			// finishes, before waiting for the rest of the group.
+			o.saveCheckpoint(ctx, in, agent.Name(), result)
 			mu.Lock()
 			defer mu.Unlock()
 			res.AgentResults[agent.Name()] = result
@@ -542,15 +674,7 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 			}
 			fnd := result.Findings
 			rawFindings = append(rawFindings, fnd...)
-			for _, f := range fnd {
-				data, err := json.Marshal(f)
-				if err == nil {
-					var payload map[string]any
-					if err := json.Unmarshal(data, &payload); err == nil {
-						emit(ReviewEvent{Event: EventFinding, Data: payload})
-					}
-				}
-			}
+			o.emitFindings(emit, fnd)
 			o.logger.Sugar().Infow("review agent finished",
 				"agent", agent.Name(),
 				"findings", len(fnd),
@@ -602,6 +726,22 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		"warnings":    warnings,
 	}})
 	return res, nil
+}
+
+// emitFindings pushes one finding event per finding. Cached and fresh
+// results share the same path so the SSE timeline looks identical.
+func (o *Orchestrator) emitFindings(emit func(ReviewEvent), findings []agents.AgentFinding) {
+	for _, f := range findings {
+		data, err := json.Marshal(f)
+		if err != nil {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(data, &payload); err != nil {
+			continue
+		}
+		emit(ReviewEvent{Event: EventFinding, Data: payload})
+	}
 }
 
 // finalMarkdown renders the verified findings as a compact markdown report

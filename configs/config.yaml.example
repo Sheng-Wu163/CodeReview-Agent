@@ -62,3 +62,7 @@ compression:
   keep_recent_rounds: 2         # newest tool-output rounds kept intact
   tool_output_hard_limit: 10000 # per-call tool output cap (characters)
   model_context_window: 128000  # model window used by the ratio trigger
+
+# v1.8.1 Checkpoint resume (FR-57..FR-60).
+force_rerun: false              # true = ignore all stored agent checkpoints
+force_rerun_agents: []          # e.g. ["security"]; only re-run these agents

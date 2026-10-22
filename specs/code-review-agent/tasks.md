@@ -721,3 +721,36 @@ T10 + T11 + T12 → T13 → T14
 - **描述**：更新 `config.yaml`，追加 `compression` 配置。更新 CHANGELOG 与 checklist，提示打 tag。
 - **预估**：1h
 - **状态**：✅ 已完成
+
+## 阶段十三：v1.8.1 Checkpoint 断点续传补丁（T59-T61）
+
+### T59: Checkpoint 数据库层实现
+- **描述**：编写 SQL 迁移文件，创建 `harness_checkpoints` 表及唯一索引。实现 `CheckpointRepository` 接口，包含 Save（Upsert 逻辑）和 GetBySHAAndAgent。
+- **文件路径**：
+  - `internal/db/migrations/003_add_checkpoints.sql`z
+  - `internal/repository/checkpoint_repo.go`
+  - `internal/repository/checkpoint_repo_test.go`
+- **完成标准**：Upsert 测试通过，唯一约束生效。
+- **依赖**：T3
+- **预估**：2h
+- **状态**：⬜ 未开始
+
+### T60: Orchestrator 与 Harness 集成
+- **描述**：
+  1. 在 Orchestrator 启动并行审查前，遍历所需的 Agent 列表，从 Checkpoint 中读取结果。
+  2. 对于未命中 Checkpoint 或需强制重跑的 Agent，分发给 Harness。
+  3. 在 Harness 的 `Execute` 方法末尾，增加将 `AgentResult` 异步写入 Checkpoint 的逻辑。
+- **文件路径**：
+  - `internal/orchestrator/orchestrator.go`
+  - `internal/harness/harness_impl.go`
+  - `internal/config/config.go`
+- **完成标准**：模拟一个已有部分 Checkpoint 的 SHA，验证 Orchestrator 仅发起了缺失 Agent 的调用。
+- **依赖**：T59, T51
+- **预估**：3h
+- **状态**：⬜ 未开始
+
+### T61: 联调测试与交付
+- **描述**：更新配置 `config.force_rerun_agents: []`。更新 CHANGELOG 并提示打 tag。
+- **依赖**：T60
+- **预估**：1h
+- **状态**：⬜ 未开始
