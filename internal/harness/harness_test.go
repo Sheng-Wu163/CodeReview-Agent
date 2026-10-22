@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"codereviewagent/internal/ai/agents"
+	ctxcontext "codereviewagent/internal/context"
 )
 
 // stubTool is a scripted tools.Tool. The first failTimes calls fail.
@@ -258,6 +259,42 @@ func TestExecuteOscillationPreservesFindingsAsPartial(t *testing.T) {
 	}
 	if len(res.Findings) != 1 {
 		t.Errorf("findings = %d, want preserved finding", len(res.Findings))
+	}
+}
+
+func TestPreparePromptKeepsPinnedAndRecentBlocks(t *testing.T) {
+	h := New(zap.NewNop(), WithCompression(8000, ctxcontext.CompressionConfig{
+		TriggerRatio:       0.65,
+		AbsoluteTokenLimit: 32000,
+		KeepRecentRounds:   2,
+	}))
+
+	diff := "diff --git a/main.go b/main.go\n+new line\n"
+	blocks := []ctxcontext.ContextBlock{
+		{Source: ctxcontext.SourceSystem, Content: "system prompt", IsPinned: true, Sequence: 0},
+		{Source: ctxcontext.SourceTaskState, Content: diff, IsPinned: true, Tokens: 500, Sequence: 1},
+		{Source: ctxcontext.SourceToolOutput, Content: "file1.go:\nSECRET_OLD_1", Tokens: 1000, Sequence: 1},
+		{Source: ctxcontext.SourceToolOutput, Content: "file2.go:\nSECRET_OLD_2", Tokens: 1000, Sequence: 2},
+		{Source: ctxcontext.SourceToolOutput, Content: "file3.go:\nSECRET_OLD_3", Tokens: 1000, Sequence: 3},
+		{Source: ctxcontext.SourceToolOutput, Content: "file4.go:\nRECENT_4", Tokens: 1000, Sequence: 4},
+		{Source: ctxcontext.SourceToolOutput, Content: "file5.go:\nRECENT_5", Tokens: 1000, Sequence: 5},
+	}
+
+	got, err := h.preparePrompt(context.Background(), blocks)
+	if err != nil {
+		t.Fatalf("preparePrompt: %v", err)
+	}
+	if !strings.Contains(got, diff) {
+		t.Errorf("pinned diff must be preserved verbatim\n%s", got)
+	}
+	if !strings.Contains(got, "RECENT_4") || !strings.Contains(got, "RECENT_5") {
+		t.Errorf("newest two tool outputs must be intact\n%s", got)
+	}
+	if strings.Contains(got, "SECRET_OLD_1") || strings.Contains(got, "SECRET_OLD_3") {
+		t.Errorf("older tool outputs should be summarized\n%s", got)
+	}
+	if !strings.Contains(got, ctxcontext.CompressedPrefix) {
+		t.Errorf("expected compressed summaries\n%s", got)
 	}
 }
 

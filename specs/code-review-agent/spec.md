@@ -757,6 +757,14 @@ type FeedbackTracker interface {
 - MODIFIED: Orchestrator 通过 Harness 执行所有 Agent，仅 `completed`/`partial` 结果进入下游验证；failed Agent 写入 `reviews.agent_results` 并在 Review 评论中报警
 - ADDED: 迁移 `005_add_agent_results.sql`，持久化每个 Agent 的状态、工具调用次数与执行日志
 
+### v1.9 (2026-10-21)
+- ADDED: `internal/context` 上下文装配层：`ContextBlock`、`CompressionConfig`、`ContextAssembler`（FR-52）
+- ADDED: 双轨压缩触发：`TriggerRatio`（默认 0.65）或 `AbsoluteTokenLimit`（默认 32000），任一满足即压缩（FR-53）
+- ADDED: 滑动窗口压缩器：按 `Sequence` 识别最新块，完整保留最近 2 轮工具输出，更早内容替换为结构化摘要（FR-54）
+- ADDED: 工具层前置熔断：`search_code` 最多返回 20 条匹配，`read_file`/`search_code` 单次输出超过硬限制时截断并告警（FR-55）
+- ADDED: Harness `preparePrompt` 集成上下文装配，Pinned 的 SYSTEM/TASK_STATE（Diff）永不压缩
+- ADDED: `compression` 配置段（trigger_ratio / absolute_token_limit / keep_recent_rounds / tool_output_hard_limit / model_context_window）
+
 ## 17. v1.8 Harness 控制层与工具治理
 
 ### 17.1 Why
@@ -813,3 +821,59 @@ type Harness interface {
 ### 17.4 Edge Cases
 - 当发生震荡被中断时，必须保留中断前的 Findings，并附带 `partial` 状态。
 - Harness 产生的日志需要异步写入数据库，以便排查执行差异。
+
+## 18. v1.9 上下文装配与记忆压缩
+
+### 18.1 Why
+随着 ReAct 循环推进，工具返回的大段代码片段导致上下文膨胀，引发“迷失在中间”（Lost in the Middle）与 Token 成本飙升。基于固定比例（如 70%）触发压缩，无法应对不同模型窗口差异及单次工具返回暴增的场景。本版本引入“双轨触发”与“滑动窗口”策略，实现运行时动态装配。
+
+### 18.2 Requirements
+
+**FR-52: 上下文来源隔离与优先级**
+在组装 Prompt 时，必须按以下优先级排序：
+1. `[SYSTEM]`：系统指令（Pinned，不可压缩）
+2. `[TASK_STATE]`：任务目标、原始 Diff、PreAnalysisFinding（Pinned，不可压缩）
+3. `[TOOL_OUTPUT]`：工具返回结果（可压缩，按时间倒序排列）
+4. `[MEMORY]`：历史经验（可压缩）
+
+**FR-53: 双轨触发机制**
+系统必须在每次 LLM 调用前估算 Token 数。满足以下任一条件即触发压缩：
+1. `当前 Token > config.trigger_ratio * 模型上下文窗口`（默认 0.65）。
+2. `当前 Token > config.absolute_token_limit`（默认 32000），防止在超长窗口模型上触发太晚。
+
+**FR-54: 滑动窗口保留策略**
+触发压缩时，**必须完整保留最近 2 轮（最新 2 次）** 的 `[TOOL_OUTPUT]`，因为它们通常包含当前正在推理的关键上下文。对更早的 `[TOOL_OUTPUT]` 执行结构化摘要压缩。
+
+**FR-55: 工具层前置熔断（Pre-filter）**
+在执行 `search_code` 或 `read_file` 工具时，如果单次返回字符数超过 `config.tool_output_hard_limit`（默认 10000 字符，约 3000 Token），工具必须在返回前自动截断，并附带 `[警告：输出过长已截断，建议缩小检索范围]`。
+
+### 18.3 Interface Freeze Declaration
+
+```go
+type ContextBlock struct {
+	Source    string // "SYSTEM", "TASK_STATE", "TOOL_OUTPUT", "MEMORY"
+	Content   string
+	Tokens    int
+	IsPinned  bool
+	Sequence  int    // 用于滑动窗口排序
+}
+
+type ContextAssembler interface {
+	Assemble(ctx context.Context, blocks []ContextBlock) (string, error)
+	ShouldCompress(blocks []ContextBlock, modelContextWindow int, cfg CompressionConfig) bool
+}
+
+type CompressionConfig struct {
+	TriggerRatio      float64 // 默认 0.65
+	AbsoluteTokenLimit int    // 默认 32000
+	KeepRecentRounds  int     // 默认 2
+}
+```
+
+### 18.4 Edge Cases
+
+| 场景 | 期望行为 |
+|------|---------|
+| PR 一进来 Diff 就超过 32K | 触发压缩，但由于 Diff 是 Pinned，不对其压缩。对后续工具输出严格限制。如果此时已无法分配给工具，直接返回 `failed_context_overflow` 警告。 |
+| `search_code` 返回 500 个结果 | 在工具层直接截断前 20 个结果，并在前端提示“匹配过多，建议更精确的关键词”。 |
+| 压缩后依然超过绝对水位 | 强制丢弃倒数第 3 轮及以前的所有 `TOOL_OUTPUT`，替换为极简的摘要（“曾读取过 X 文件”）。 |

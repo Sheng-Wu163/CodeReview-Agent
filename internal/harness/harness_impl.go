@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"codereviewagent/internal/ai/agents"
+	ctxcontext "codereviewagent/internal/context"
 )
 
 // ErrorReasonNoToolCalls is the completion-gate reason attached when an
@@ -35,6 +36,11 @@ type Executor struct {
 	maxRetries     int
 	retryBaseDelay time.Duration
 	readOnly       map[string]bool
+	// assembler implements the v1.9 context assembly and compression
+	// pipeline (FR-52..FR-54).
+	assembler   ctxcontext.ContextAssembler
+	compression ctxcontext.CompressionConfig
+	modelWindow int
 }
 
 // Compile-time check that Executor implements Harness.
@@ -69,6 +75,15 @@ func WithRetryPolicy(maxRetries int, baseDelay time.Duration) Option {
 	}
 }
 
+// WithCompression configures the v1.9 context assembler with the model
+// context window and the dual-track compression thresholds.
+func WithCompression(modelWindow int, cfg ctxcontext.CompressionConfig) Option {
+	return func(e *Executor) {
+		e.modelWindow = modelWindow
+		e.compression = cfg
+	}
+}
+
 // WithReadOnlyTools replaces the set of tool names eligible for retries.
 // Read-only tools are the only ones retried in this iteration.
 func WithReadOnlyTools(names ...string) Option {
@@ -100,7 +115,21 @@ func New(logger *zap.Logger, opts ...Option) *Executor {
 	for _, opt := range opts {
 		opt(e)
 	}
+	e.assembler = ctxcontext.NewAssembler(e.compression).WithModelWindow(e.modelWindow)
 	return e
+}
+
+// preparePrompt assembles the prompt from context blocks before an LLM call
+// (v1.9 FR-52..FR-54, T57). Compression only applies to non-pinned blocks;
+// the newest two tool outputs are kept intact.
+func (e *Executor) preparePrompt(ctx context.Context, blocks []ctxcontext.ContextBlock) (string, error) {
+	return e.assembler.Assemble(ctx, blocks)
+}
+
+// PreparePrompt is the exported form of preparePrompt, used by prompt
+// writers that delegate context assembly to the Harness.
+func (e *Executor) PreparePrompt(ctx context.Context, blocks []ctxcontext.ContextBlock) (string, error) {
+	return e.preparePrompt(ctx, blocks)
 }
 
 // Execute implements Harness (FR-48). It wraps the input tools, runs the

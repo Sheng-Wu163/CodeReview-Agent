@@ -94,6 +94,7 @@ func run() error {
 			return agents.NewVerifier(tools.ReadFileTool{Root: root}, nil)
 		}, nil)
 	orch.SetAnalysisConfig(cfg.StaticAnalysis)
+	orch.SetCompressionConfig(cfg.Compression)
 	orch.SetReviewStrategy(review.NewAssessor(review.AssessorOptions{
 		TrivialMaxLines: cfg.StaticAnalysis.Adaptive.TrivialMaxLines,
 		ComplexMinLines: cfg.StaticAnalysis.Adaptive.ComplexMinLines,

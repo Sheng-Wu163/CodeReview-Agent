@@ -667,3 +667,57 @@ T10 + T11 + T12 → T13 → T14
 - **依赖**：T52
 - **预估**：1h
 - **状态**：✅ 已完成
+
+## 阶段十二：v1.9 上下文装配与记忆压缩（T54-T59）
+
+### T54: 上下文数据结构与双轨监控器
+- **描述**：定义 `ContextBlock` 和 `CompressionConfig`。实现 `ShouldCompress` 逻辑，同时校验 `trigger_ratio` 和 `absolute_token_limit`。
+- **文件路径**：
+  - `internal/context/assembler.go`
+  - `internal/context/monitor.go`
+  - `internal/context/monitor_test.go`
+- **完成标准**：
+  - 模拟 8K 窗口，Token 达到 5.3K (65%) 时返回 true。
+  - 模拟 128K 窗口，Token 达到 33K (超 32K) 时返回 true。
+- **依赖**：T1
+- **预估**：2h
+- **状态**：✅ 已完成
+
+### T55: 工具层前置截断与熔断
+- **描述**：修改 `search_code` 和 `read_file` 工具的执行逻辑。在返回结果前评估字符数。若超限，执行截断并附加警告提示，防止单次返回击穿上下文。
+- **文件路径**：
+  - `internal/ai/tools/read_file.go`
+  - `internal/ai/tools/search_code.go`
+  - `internal/ai/tools/tools_test.go`
+- **完成标准**：
+  - 模拟读取一个 5000 行文件，验证返回结果被截断至限制长度，且包含截断警告。
+- **依赖**：T54
+- **预估**：2h
+- **状态**：✅ 已完成
+
+### T56: 滑动窗口压缩器实现
+- **描述**：实现 `Compressor`。接收 `[]ContextBlock`，跳过 `IsPinned=true` 的块。按 `Sequence` 排序，保留最新的 N 个 `TOOL_OUTPUT` 块。对更早的块执行代码首尾截断或替换为简短摘要。
+- **文件路径**：
+  - `internal/context/compressor.go`
+  - `internal/context/compressor_test.go`
+- **完成标准**：
+  - 提供 5 个 `TOOL_OUTPUT` 块，`KeepRecentRounds=2`。验证前 3 个被压缩，后 2 个完整保留。
+- **依赖**：T54
+- **预估**：3h
+- **状态**：✅ 已完成
+
+### T57: ContextAssembler 集成到 Harness
+- **描述**：在 Harness 中，每次调用 LLM 前：1) 收集 Blocks；2) 检查 `ShouldCompress`；3) 执行压缩；4) 调用 `Assemble` 排序并拼接字符串。
+- **文件路径**：
+  - `internal/harness/harness_impl.go`
+  - `internal/harness/harness_test.go`
+- **完成标准**：
+  - 验证 Prompt 中 Pinned 块（Diff）完整保留，且最新的两轮工具输出未被破坏。
+- **依赖**：T56, T51
+- **预估**：4h
+- **状态**：✅ 已完成
+
+### T58: v1.9 集成测试与交付
+- **描述**：更新 `config.yaml`，追加 `compression` 配置。更新 CHANGELOG 与 checklist，提示打 tag。
+- **预估**：1h
+- **状态**：✅ 已完成

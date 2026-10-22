@@ -92,6 +92,16 @@ type reviewAgent struct {
 	name       string
 	promptFile string
 	llm        llms.Model
+	// modelWindow and compression configure the v1.9 in-loop context
+	// compression (FR-53/FR-54). Zero values use the spec defaults.
+	modelWindow int
+	compression ctxcontext.CompressionConfig
+}
+
+// SetCompression configures v1.9 in-loop memory compression for this agent.
+func (a *reviewAgent) SetCompression(modelWindow int, cfg ctxcontext.CompressionConfig) {
+	a.modelWindow = modelWindow
+	a.compression = cfg
 }
 
 // newReviewAgent creates a review agent identified by name that reasons with
@@ -117,7 +127,13 @@ func (a *reviewAgent) Review(ctx context.Context, input ReviewInput) ([]AgentFin
 	}
 
 	react := agents.NewOneShotAgent(a.llm, input.Tools)
-	executor := agents.NewExecutor(react, agents.WithMaxIterations(maxAgentIterations))
+	// v1.9: compress older tool observations before every planning step.
+	planner := &compressingAgent{
+		inner:       react,
+		modelWindow: a.modelWindow,
+		cfg:         a.compression,
+	}
+	executor := agents.NewExecutor(planner, agents.WithMaxIterations(maxAgentIterations))
 
 	question := buildReviewQuestion(systemPrompt, input)
 	result, err := executor.Call(ctx, map[string]any{"input": question},

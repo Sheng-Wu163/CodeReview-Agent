@@ -2,10 +2,12 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/tmc/langchaingo/tools"
 )
@@ -296,5 +298,60 @@ func TestAllToolsImplementToolInterface(t *testing.T) {
 		if tool.Description() == "" {
 			t.Errorf("%T has empty Description()", tool)
 		}
+	}
+}
+
+func TestReadFileToolTruncatesLargeOutput(t *testing.T) {
+	root := t.TempDir()
+	var b strings.Builder
+	for i := 0; i < 3000; i++ {
+		fmt.Fprintf(&b, "%04d\tconst value%d = 1234567890\n", i+1, i)
+	}
+	if err := os.WriteFile(filepath.Join(root, "large.go"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := ReadFileTool{Root: root, MaxOutputChars: 1000}
+	out, err := tool.Call(context.Background(), "large.go")
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, TruncationWarning) {
+		t.Errorf("output must contain %q", TruncationWarning)
+	}
+	if !strings.Contains(out, "0001") {
+		t.Errorf("output must keep the beginning of the file")
+	}
+	if strings.Contains(out, "3000") {
+		t.Errorf("output must not contain the end of a 3000-line file")
+	}
+	if got := utf8.RuneCountInString(out); got > 1000 {
+		t.Errorf("output length = %d runes, want at most the 1000 limit", got)
+	}
+}
+
+func TestSearchCodeToolTruncatesMatchCount(t *testing.T) {
+	root := t.TempDir()
+	var b strings.Builder
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&b, "needle line %d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(root, "needle.txt"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := SearchCodeTool{Root: root}
+	out, err := tool.Call(context.Background(), "needle | *.txt")
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, TruncationWarning) {
+		t.Errorf("output must contain %q", TruncationWarning)
+	}
+	if got := strings.Count(out, "needle.txt:"); got != MaxSearchResults {
+		t.Errorf("returned matches = %d, want %d", got, MaxSearchResults)
+	}
+	if !strings.Contains(out, "匹配过多") {
+		t.Errorf("output should suggest a more precise query: %q", out)
 	}
 }

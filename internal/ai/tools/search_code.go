@@ -25,6 +25,9 @@ const maxSearchFileBytes = 512 * 1024
 type SearchCodeTool struct {
 	// Root is the absolute path of the review workspace.
 	Root string
+	// MaxOutputChars caps the returned text; zero uses
+	// DefaultToolOutputHardLimit (v1.9 FR-55).
+	MaxOutputChars int
 }
 
 // Compile-time check that SearchCodeTool implements tools.Tool (FR-11).
@@ -58,7 +61,17 @@ func (t SearchCodeTool) Call(_ context.Context, input string) (string, error) {
 	if len(matches) == 0 {
 		return "no matches found", nil
 	}
-	return strings.Join(matches, "\n"), nil
+	notice := ""
+	if len(matches) > MaxSearchResults {
+		matches = matches[:MaxSearchResults]
+		notice = searchTruncationNotice()
+	}
+	joined := strings.Join(matches, "\n")
+	output := limitOutput(joined, t.MaxOutputChars)
+	if output != joined {
+		return output, nil
+	}
+	return ensureNotice(output, notice), nil
 }
 
 // parseSearchInput splits "<regex>[ | <glob>]" into its parts.

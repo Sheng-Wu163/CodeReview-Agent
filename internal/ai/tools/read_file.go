@@ -47,6 +47,9 @@ func resolvePath(root, rel string) (string, error) {
 type ReadFileTool struct {
 	// Root is the absolute path of the review workspace.
 	Root string
+	// MaxOutputChars caps the returned text; zero uses
+	// DefaultToolOutputHardLimit (v1.9 FR-55).
+	MaxOutputChars int
 }
 
 // Compile-time check that ReadFileTool implements tools.Tool (FR-11).
@@ -92,7 +95,7 @@ func (t ReadFileTool) Call(_ context.Context, input string) (string, error) {
 	for i := start; i <= end; i++ {
 		fmt.Fprintf(&b, "%d\t%s\n", i, strings.TrimSuffix(lines[i-1], "\r"))
 	}
-	return b.String(), nil
+	return limitOutput(b.String(), t.MaxOutputChars), nil
 }
 
 // parseRangeInput splits "<path>[:start[:end]]" into its parts. Line numbers

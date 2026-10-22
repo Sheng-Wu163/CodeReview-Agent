@@ -189,7 +189,10 @@ type Orchestrator struct {
 	// staticCfg is the static analysis configuration applied by
 	// analysisFactory (set via SetAnalysisConfig).
 	staticCfg config.StaticAnalysisConfig
-	filter    *diff.Filter
+	// compressionCfg is the v1.9 context/tool-output configuration (set via
+	// SetCompressionConfig).
+	compressionCfg config.CompressionConfig
+	filter         *diff.Filter
 	// agentTimeout bounds each agent's ReAct loop (AC-22: LLM API calls
 	// exceeding 60s mark that agent as failed without affecting others).
 	agentTimeout time.Duration
@@ -226,8 +229,34 @@ func New(logger *zap.Logger, root string, reviewAgents []agents.ReviewAgent, ver
 	}
 	o.assessor = review.NewAssessor(review.AssessorOptions{})
 	o.selector = review.NewSelector()
-	o.runner = harness.New(logger, harness.WithTimeout(o.agentTimeout))
+	o.runner = o.newHarness()
 	return o
+}
+
+// newHarness builds the Harness control layer with the current agent
+// timeout and v1.9 compression configuration.
+func (o *Orchestrator) newHarness() harness.Harness {
+	return harness.New(o.logger,
+		harness.WithTimeout(o.agentTimeout),
+		harness.WithCompression(o.compressionCfg.ModelContextWindow, ctxcontext.CompressionConfig{
+			TriggerRatio:       o.compressionCfg.TriggerRatio,
+			AbsoluteTokenLimit: o.compressionCfg.AbsoluteTokenLimit,
+			KeepRecentRounds:   o.compressionCfg.KeepRecentRounds,
+		}))
+}
+
+// SetCompressionConfig applies the v1.9 context compression and tool-output
+// limits (FR-52..FR-55). Must be called before Run.
+func (o *Orchestrator) SetCompressionConfig(cfg config.CompressionConfig) {
+	o.compressionCfg = cfg
+	o.runner = o.newHarness()
+	// Enable v1.9 in-loop observation compression on the real agents. Mock
+	// agents without SetCompression are left untouched.
+	agents.ConfigureCompression(o.agents, cfg.ModelContextWindow, ctxcontext.CompressionConfig{
+		TriggerRatio:       cfg.TriggerRatio,
+		AbsoluteTokenLimit: cfg.AbsoluteTokenLimit,
+		KeepRecentRounds:   cfg.KeepRecentRounds,
+	})
 }
 
 // SetHarness overrides the v1.8 Harness control layer. Tests inject a mock;
@@ -623,7 +652,10 @@ func (o *Orchestrator) runAgent(ctx context.Context, a agents.ReviewAgent, input
 // pipeline, not through agent tools.
 func (o *Orchestrator) buildTools(root string) []ltools.Tool {
 	return []ltools.Tool{
-		tools.ReadFileTool{Root: root},
+		tools.ReadFileTool{
+			Root:           root,
+			MaxOutputChars: o.compressionCfg.ToolOutputHardLimit,
+		},
 	}
 }
 

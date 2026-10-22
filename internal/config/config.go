@@ -31,6 +31,29 @@ type Config struct {
 	StaticAnalysis StaticAnalysisConfig `mapstructure:"static_analysis"`
 	// Feedback configures the v1.4 implicit feedback tracking.
 	Feedback FeedbackConfig `mapstructure:"feedback"`
+	// Compression configures the v1.9 context assembly and memory
+	// compression pipeline (FR-52..FR-55).
+	Compression CompressionConfig `mapstructure:"compression"`
+}
+
+// CompressionConfig holds the v1.9 dual-track compression thresholds and
+// tool-output pre-filter limit.
+type CompressionConfig struct {
+	// TriggerRatio is the fraction of the model context window that
+	// triggers compression (default 0.65).
+	TriggerRatio float64 `mapstructure:"trigger_ratio"`
+	// AbsoluteTokenLimit is the absolute compression ceiling (default
+	// 32000).
+	AbsoluteTokenLimit int `mapstructure:"absolute_token_limit"`
+	// KeepRecentRounds is the number of newest tool-output rounds kept
+	// intact (default 2).
+	KeepRecentRounds int `mapstructure:"keep_recent_rounds"`
+	// ToolOutputHardLimit caps a single tool result in characters (default
+	// 10000).
+	ToolOutputHardLimit int `mapstructure:"tool_output_hard_limit"`
+	// ModelContextWindow is the model window used by the ratio trigger
+	// (default 128000).
+	ModelContextWindow int `mapstructure:"model_context_window"`
 }
 
 // FeedbackConfig holds the implicit feedback tracker settings (v1.4
@@ -153,6 +176,11 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("static_analysis.adaptive.complex_min_lines", 200)
 	v.SetDefault("static_analysis.adaptive.complex_min_files", 5)
 	v.SetDefault("feedback.similarity_threshold", 0.8)
+	v.SetDefault("compression.trigger_ratio", 0.65)
+	v.SetDefault("compression.absolute_token_limit", 32000)
+	v.SetDefault("compression.keep_recent_rounds", 2)
+	v.SetDefault("compression.tool_output_hard_limit", 10000)
+	v.SetDefault("compression.model_context_window", 128000)
 
 	// Environment variable bindings. BindEnv ensures that Unmarshal picks up
 	// environment values even for keys that are absent from the YAML file.

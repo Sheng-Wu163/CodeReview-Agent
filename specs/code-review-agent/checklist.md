@@ -356,3 +356,36 @@
 - [x] `spec.md` 的 CHANGELOG 已追加 v1.8
 - [x] `tasks.md` 中 T49 ~ T53 已标记完成
 - [ ] git tag `v1.8-complete` 已打 ← 由用户人工执行
+
+## v1.9 上下文装配与记忆压缩验收
+
+### 双轨触发验收
+
+- [x] AC-107: Given 模型窗口 8K，当前 5.3K, When 检查 ShouldCompress, Then 返回 true（比例触发）。
+  - ✅ `TestShouldCompress`：5300 > 8000 × 0.65
+- [x] AC-108: Given 模型窗口 128K，当前 33K, When 检查 ShouldCompress, Then 返回 true（绝对水位触发）。
+  - ✅ `TestShouldCompress`：33000 > 32000
+
+### 工具熔断验收
+
+- [x] AC-109: Given `search_code` 匹配到 100 个结果, When 工具返回, Then 仅返回前 20 个，且附带 `[警告：输出过长已截断]`。
+  - ✅ `TestSearchCodeToolTruncatesMatchCount`
+- [x] AC-110: Given `read_file` 读取 3000 行大文件, When 工具返回, Then 仅返回前 1000 字符（或按行截断），防止单次击穿。
+  - ✅ `TestReadFileToolTruncatesLargeOutput`（`MaxOutputChars=1000`），默认生产限制 10000 字符
+
+### 滑动窗口与装配验收
+
+- [x] AC-111: Given 5 轮工具调用历史, When 触发压缩且 KeepRecentRounds=2, Then 第 1-3 轮被摘要替换，第 4-5 轮保持完整。
+  - ✅ `TestCompressorKeepsNewestTwoRounds`（乱序 Sequence 输入仍按 Sequence 判断）；`TestCompressingAgentCompressesOlderSteps` 覆盖 ReAct 循环内实际压缩
+- [x] AC-112: Given 包含 System, Diff(Pinned), ToolOutput 的块列表, When Assemble 执行, Then 输出顺序为 System -> Diff -> ToolOutput，且 Pinned 块内容未变。
+  - ✅ `TestAssembleOrdersBySourcePriority` + `TestPreparePromptKeepsPinnedAndRecentBlocks`
+
+## v1.9 迭代交付清单
+
+- [x] AC-107 ~ AC-112 全部通过
+- [x] `go build ./...` 通过
+- [x] `go test ./...` 通过（本机无 gcc，`-race` 需在具备 cgo 的环境补充执行）
+- [x] `configs/config.yaml.example` 已追加 `compression` 配置
+- [x] `spec.md` 的 CHANGELOG 已追加 v1.9
+- [x] `tasks.md` 中 T54 ~ T58 已标记完成
+- [ ] git tag `v1.9-complete` 已打 ← 由用户人工执行
