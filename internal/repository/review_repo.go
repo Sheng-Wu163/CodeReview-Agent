@@ -30,8 +30,16 @@ type Review struct {
 	// AgentResults holds the serialized structured Harness results of every
 	// executed agent, including tool-call fingerprints (v1.8 FR-49 / 17.4).
 	AgentResults string
-	CreatedAt    time.Time
-	UpdatedAt    *time.Time
+	// ReviewedSHA is the head SHA covered by this review (v1.10 FR-62).
+	ReviewedSHA string
+	// BaseSHA is the comparison base used by an incremental review.
+	BaseSHA string
+	// Scope is "full" or "incremental" (v1.10 FR-61).
+	Scope string
+	// ScopeReason explains a full-review fallback, e.g. "before_unreachable".
+	ScopeReason string
+	CreatedAt   time.Time
+	UpdatedAt   *time.Time
 }
 
 // Finding is a single issue reported by a review agent.
@@ -45,6 +53,9 @@ type Finding struct {
 	Message    string
 	Suggestion string
 	Confidence float64
+	// Fingerprint is the stable v1.11 finding identity (FR-66); line
+	// numbers are intentionally excluded.
+	Fingerprint string
 	// FeedbackStatus is the v1.4 implicit feedback state of the finding
 	// (FR-39): "pending", "accepted_implicit" or "ignored_implicit"
 	// ("accepted_explicit"/"rejected_explicit" are reserved).
@@ -66,16 +77,67 @@ func NewReviewRepo(pool *pgxpool.Pool) *ReviewRepo {
 // CreateReview inserts a review and returns its generated ID.
 func (r *ReviewRepo) CreateReview(ctx context.Context, rev *Review) (int64, error) {
 	var id int64
+	reviewedSHA := rev.ReviewedSHA
+	if reviewedSHA == "" {
+		reviewedSHA = rev.HeadSHA
+	}
 	err := r.pool.QueryRow(ctx, `
-		INSERT INTO reviews (repo_full_name, pr_number, head_sha, status, summary)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO reviews
+			(repo_full_name, pr_number, head_sha, status, summary,
+			 reviewed_sha, base_sha, scope, scope_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id`,
 		rev.RepoFullName, rev.PRNumber, rev.HeadSHA, rev.Status, rev.Summary,
+		reviewedSHA, rev.BaseSHA, rev.Scope, rev.ScopeReason,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert review: %w", err)
 	}
 	return id, nil
+}
+
+// UpdateReviewAnchor stores the reviewed SHA, comparison base and scope of
+// one review (v1.10 FR-61/FR-62).
+func (r *ReviewRepo) UpdateReviewAnchor(ctx context.Context, id int64, reviewedSHA, baseSHA, scope, scopeReason string) error {
+	if _, err := r.pool.Exec(ctx, `
+		UPDATE reviews
+		SET reviewed_sha = $2, base_sha = $3, scope = $4, scope_reason = $5
+		WHERE id = $1`, id, reviewedSHA, baseSHA, scope, scopeReason,
+	); err != nil {
+		return fmt.Errorf("update review %d anchor: %w", id, err)
+	}
+	return nil
+}
+
+// LatestCompletedReview returns the most recent completed review for a PR
+// (v1.10 FR-62). failed and pending rows are ignored. It returns
+// pgx.ErrNoRows when no completed review exists.
+func (r *ReviewRepo) LatestCompletedReview(ctx context.Context, repoFullName string, prNumber int) (*Review, error) {
+	var rev Review
+	var updatedAt *time.Time
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, repo_full_name, pr_number, head_sha, status, summary,
+		       COALESCE(pre_findings::text, ''), COALESCE(agent_status::text, ''),
+		       COALESCE(agent_results::text, ''),
+		       COALESCE(reviewed_sha, head_sha), COALESCE(base_sha, ''),
+		       COALESCE(scope, ''), COALESCE(scope_reason, ''),
+		       created_at, updated_at
+		FROM reviews
+		WHERE repo_full_name = $1 AND pr_number = $2 AND status = 'completed'
+		ORDER BY created_at DESC
+		LIMIT 1`, repoFullName, prNumber,
+	).Scan(&rev.ID, &rev.RepoFullName, &rev.PRNumber, &rev.HeadSHA,
+		&rev.Status, &rev.Summary, &rev.PreFindings, &rev.AgentStatus,
+		&rev.AgentResults, &rev.ReviewedSHA, &rev.BaseSHA, &rev.Scope,
+		&rev.ScopeReason, &rev.CreatedAt, &updatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, err
+		}
+		return nil, fmt.Errorf("latest completed review for %s#%d: %w", repoFullName, prNumber, err)
+	}
+	rev.UpdatedAt = updatedAt
+	return &rev, nil
 }
 
 // UpdateReviewPreFindings stores the serialized static-analysis preFindings
@@ -147,11 +209,15 @@ func (r *ReviewRepo) GetReview(ctx context.Context, id int64) (*Review, error) {
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, repo_full_name, pr_number, head_sha, status, summary,
 		       COALESCE(pre_findings::text, ''), COALESCE(agent_status::text, ''),
-		       COALESCE(agent_results::text, ''), created_at, updated_at
+		       COALESCE(agent_results::text, ''),
+		       COALESCE(reviewed_sha, head_sha), COALESCE(base_sha, ''),
+		       COALESCE(scope, ''), COALESCE(scope_reason, ''),
+		       created_at, updated_at
 		FROM reviews WHERE id = $1`, id,
 	).Scan(&rev.ID, &rev.RepoFullName, &rev.PRNumber, &rev.HeadSHA,
 		&rev.Status, &rev.Summary, &rev.PreFindings, &rev.AgentStatus,
-		&rev.AgentResults, &rev.CreatedAt, &updatedAt)
+		&rev.AgentResults, &rev.ReviewedSHA, &rev.BaseSHA, &rev.Scope,
+		&rev.ScopeReason, &rev.CreatedAt, &updatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, err
@@ -168,7 +234,10 @@ func (r *ReviewRepo) ListReviews(ctx context.Context, limit int) ([]Review, erro
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, repo_full_name, pr_number, head_sha, status, summary,
 		       COALESCE(pre_findings::text, ''), COALESCE(agent_status::text, ''),
-		       COALESCE(agent_results::text, ''), created_at, updated_at
+		       COALESCE(agent_results::text, ''),
+		       COALESCE(reviewed_sha, head_sha), COALESCE(base_sha, ''),
+		       COALESCE(scope, ''), COALESCE(scope_reason, ''),
+		       created_at, updated_at
 		FROM reviews ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list reviews: %w", err)
@@ -181,7 +250,8 @@ func (r *ReviewRepo) ListReviews(ctx context.Context, limit int) ([]Review, erro
 		var updatedAt *time.Time
 		if err := rows.Scan(&rev.ID, &rev.RepoFullName, &rev.PRNumber, &rev.HeadSHA,
 			&rev.Status, &rev.Summary, &rev.PreFindings, &rev.AgentStatus,
-			&rev.AgentResults, &rev.CreatedAt, &updatedAt); err != nil {
+			&rev.AgentResults, &rev.ReviewedSHA, &rev.BaseSHA, &rev.Scope,
+			&rev.ScopeReason, &rev.CreatedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan review row: %w", err)
 		}
 		rev.UpdatedAt = updatedAt
@@ -197,10 +267,10 @@ func (r *ReviewRepo) ListReviews(ctx context.Context, limit int) ([]Review, erro
 func (r *ReviewRepo) CreateFinding(ctx context.Context, f *Finding) (int64, error) {
 	var id int64
 	err := r.pool.QueryRow(ctx, `
-		INSERT INTO findings (review_id, agent, severity, file_path, line_number, message, suggestion, confidence)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO findings (review_id, agent, severity, file_path, line_number, message, suggestion, confidence, fingerprint)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id`,
-		f.ReviewID, f.Agent, f.Severity, f.FilePath, f.LineNumber, f.Message, f.Suggestion, f.Confidence,
+		f.ReviewID, f.Agent, f.Severity, f.FilePath, f.LineNumber, f.Message, f.Suggestion, f.Confidence, f.Fingerprint,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert finding: %w", err)
@@ -212,7 +282,7 @@ func (r *ReviewRepo) CreateFinding(ctx context.Context, f *Finding) (int64, erro
 // insertion order (FR-15 detail page).
 func (r *ReviewRepo) ListFindings(ctx context.Context, reviewID int64) ([]Finding, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, review_id, agent, severity, file_path, line_number, message, suggestion, confidence, feedback_status
+		SELECT id, review_id, agent, severity, file_path, line_number, message, suggestion, confidence, fingerprint, feedback_status
 		FROM findings
 		WHERE review_id = $1
 		ORDER BY CASE severity
@@ -230,7 +300,7 @@ func (r *ReviewRepo) ListFindings(ctx context.Context, reviewID int64) ([]Findin
 		var f Finding
 		var suggestion *string
 		if err := rows.Scan(&f.ID, &f.ReviewID, &f.Agent, &f.Severity, &f.FilePath,
-			&f.LineNumber, &f.Message, &suggestion, &f.Confidence, &f.FeedbackStatus); err != nil {
+			&f.LineNumber, &f.Message, &suggestion, &f.Confidence, &f.Fingerprint, &f.FeedbackStatus); err != nil {
 			return nil, fmt.Errorf("scan finding row: %w", err)
 		}
 		if suggestion != nil {

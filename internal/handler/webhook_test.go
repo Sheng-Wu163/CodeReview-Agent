@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -72,7 +75,7 @@ func TestWebhookPullRequestOpened(t *testing.T) {
 }
 
 func TestWebhookPullRequestSynchronize(t *testing.T) {
-	body := []byte(`{"action":"synchronize","number":7,"pull_request":{"head":{"sha":"deadbeef"}},"repository":{"full_name":"a/b"}}`)
+	body := []byte(`{"action":"synchronize","number":7,"before":"old-sha","pull_request":{"head":{"sha":"deadbeef"}},"repository":{"full_name":"a/b"}}`)
 
 	rec, event := serve(t, body, "pull_request")
 
@@ -81,6 +84,9 @@ func TestWebhookPullRequestSynchronize(t *testing.T) {
 	}
 	if event == nil || event.Action != "synchronize" {
 		t.Fatalf("expected synchronize event to be handled, got %+v", event)
+	}
+	if event.BeforeSHA != "old-sha" {
+		t.Errorf("BeforeSHA = %q, want old-sha (v1.10 FR-61)", event.BeforeSHA)
 	}
 }
 
@@ -237,5 +243,57 @@ func TestWebhookMethodNotAllowed(t *testing.T) {
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+// chunkedReader returns at most 16 bytes per Read, simulating a partial
+// socket read or chunked transfer.
+type chunkedReader struct{ r io.Reader }
+
+func (c chunkedReader) Read(p []byte) (int, error) {
+	if len(p) > 16 {
+		p = p[:16]
+	}
+	return c.r.Read(p)
+}
+
+// TestWebhookReadsCompleteBody covers AC-124: payloads larger than a single
+// Read buffer and chunked requests without ContentLength must still be
+// parsed correctly by the HMAC-protected webhook.
+func TestWebhookReadsCompleteBody(t *testing.T) {
+	pad := strings.Repeat("0123456789abcdef", 1024) // ~16 KB
+	body := []byte(fmt.Sprintf(
+		`{"action":"opened","number":42,"pull_request":{"head":{"sha":"abc"}},"repository":{"full_name":"foo/bar"},"pad":%q}`,
+		pad))
+
+	for _, tc := range []struct {
+		name          string
+		contentLength int64
+	}{
+		{name: "known content length", contentLength: int64(len(body))},
+		{name: "chunked unknown length", contentLength: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			webhook := NewWebhook(zap.NewNop(), nil, nil)
+			req := httptest.NewRequest(http.MethodPost, "/webhook", nil)
+			req.Body = io.NopCloser(chunkedReader{bytes.NewReader(body)})
+			req.ContentLength = tc.contentLength
+			req.Header.Set("X-GitHub-Event", "pull_request")
+			req.Header.Set("X-Hub-Signature-256", middleware.ComputeSignature(testSecret, body))
+
+			rec := httptest.NewRecorder()
+			middleware.HMACVerify(testSecret)(webhook).ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d (body %q)", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			var event PullRequestEvent
+			if err := json.Unmarshal(rec.Body.Bytes(), &event); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if event.HeadSHA != "abc" || event.RepoFullName != "foo/bar" {
+				t.Errorf("event = %+v, want parsed payload", event)
+			}
+		})
 	}
 }

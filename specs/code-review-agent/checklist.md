@@ -396,3 +396,183 @@
 - [ ] AC-114: Given 某次审查中 `security` Agent 超时失败, When 重新触发相同 SHA 的审查, Then Orchestrator 跳过已完成 Agent，且重新执行 `security` Agent（由于状态为 `failed`）。
 - [ ] AC-115: Given 存在完整的 Checkpoint 记录, When 配置 `force_rerun=true` 触发审查, Then 系统忽略 Checkpoint，重新调用所有 Agent。
 - [ ] AC-116: Given 审查中途进程被强制 Kill, When 重新启动并恢复, Then 数据库中存在已执行完毕 Agent 的 Checkpoint，避免重复扣费。
+
+## v1.10 PR 增量审查与跨回合状态验收
+
+### 增量审查验收
+
+- [x] AC-117: Given `synchronize` 事件且基准 SHA 可达, When Process 执行, Then 审查 diff 为 `基准..HeadSHA`，`scope = incremental`。
+  - ✅ `TestPipelineIncrementalUsesCompare`（锚点 `reviewed_sha` 优先于 `before`）
+- [x] AC-118: Given force-push 使基准 SHA 不可达, When Process 执行, Then 回退全量，`scope_reason = before_unreachable`。
+  - ✅ `TestPipelineFallsBackWhenBaseUnreachable`
+
+### 锚点与跨回合验收
+
+- [x] AC-119: Given 最近一轮审查为 `failed`、更早一轮为 `completed`, When 计算锚点, Then 锚点为更早的 `completed` 记录的 `reviewed_sha`。
+  - ✅ `TestLatestCompletedReviewIgnoresFailedAndPending`
+- [x] AC-120: Given 首次审查（无锚点）, When 组装 Prompt, Then 不包含 `PRIOR_FINDINGS` 段。
+  - ✅ `TestBuildReviewQuestionOmitsPriorWhenEmpty`
+- [x] AC-121: Given 上轮 finding 所在代码已修复且 Agent 读取到当前代码, When 审查, Then 判定为 `fixed`，且不作为新 finding 输出。
+  - ✅ `TestEnforcePriorVerdict` + `TestCollectPriorVerdicts`（fixed 需 evidence，且不进入 finding 流）
+- [x] AC-122: Given 上轮 finding 所在文件无法读取, When 审查, Then 判定为 `unverifiable`，不得判定为 `fixed`。
+  - ✅ `TestEnforcePriorVerdict`（fixed 无 evidence → unverifiable）
+
+### Checkpoint 与 Webhook 验收
+
+- [x] AC-123: Given 同一 SHA 下存在 `partial` 结果的 Checkpoint, When 重新审查, Then 该 Agent 重新执行，不复用该结果。
+  - ✅ `TestOrchestratorReRunsPartialCheckpoint` + `TestCheckpointFourPartKey`
+- [x] AC-124: Given 超过单次 Read 缓冲区的 webhook payload, When Webhook 处理, Then HMAC 校验与 JSON 解析均成功。
+  - ✅ `TestWebhookReadsCompleteBody`（16KB、短读、ContentLength=-1）
+
+## v1.10 迭代交付清单
+
+- [x] AC-117 ~ AC-124 全部通过
+- [x] `go build ./...` 通过
+- [x] `go test ./...` 通过（本机无 gcc，`-race` 需在具备 cgo 的环境补充执行）
+- [x] `spec.md` 的 CHANGELOG 已追加 v1.10
+- [x] `tasks.md` 中 T62 ~ T67 已标记完成
+- [x] 变更提案 `specs/changes/v1.10-prior-findings/proposal.md` 已获批准
+- [ ] git tag `v1.10-complete` 已打 ← 由用户人工执行
+
+## v1.11 评论回写去重与线程闭环验收
+
+### 指纹与分类验收
+
+- [x] AC-125: Given 同一 finding 因上方插入代码导致行号变化, When 计算指纹, Then 指纹不变。
+  - ✅ `TestFindingFingerprintIgnoresLineNumber` + `TestFindingFingerprintNormalizesInput`
+- [x] AC-126: Given 线程已存在且指纹相同, When 回写, Then 不提交重复的内联评论。
+  - ✅ `TestPipelineDeduplicatesExistingThreads` + `TestPlanPublishPersistingNotReCommented`
+- [x] AC-127: Given 本轮新增一个 finding, When 回写, Then 仅该 finding 作为内联评论提交。
+  - ✅ `TestPipelineSubmitsOnlyNewFinding` + `TestPlanPublishOnlyNewFindingSubmitted`
+
+### 线程闭环验收
+
+- [x] AC-128: Given 线程为 open 且对应 finding 判定为 `fixed`, When 回写, Then 该线程被 resolve。
+  - ✅ `TestPipelineResolvesFixedThread` + `ResolveReviewThread` GraphQL 测试
+- [x] AC-129: Given 线程已被人工 resolve, When 回写, Then 不重复评论，且线程状态不变。
+  - ✅ `TestPlanPublishIgnoresHumanResolvedThread`
+- [x] AC-132: Given `accepted_implicit` 的 finding 判定为 `still_present`, When 回写, Then 线程不被 resolve。
+  - ✅ `TestPlanPublishStillPresentCriticalRequestsChanges`（无 Resolved 项）
+
+### 事件类型与降级验收
+
+- [x] AC-130: Given 上轮 critical 已修复（线程已 resolved）且本轮无新 critical, When 回写, Then 事件为 `COMMENT`。
+  - ✅ `TestPlanPublishResolvedCriticalUsesComment`
+- [x] AC-131: Given 线程读取 API 失败, When 回写, Then 降级为提交全部 new 并在 summary 中警告，流程不中断。
+  - ✅ `TestPipelineThreadReadFailureFallsBack`
+
+## v1.11 迭代交付清单
+
+- [x] AC-125 ~ AC-132 全部通过
+- [x] `go build ./...` 通过
+- [x] `go test ./...` 通过（本机无 gcc，`-race` 需在具备 cgo 的环境补充执行）
+- [x] 迁移 `008_add_finding_fingerprint.sql` 与启动回填已落地
+- [x] `spec.md` 的 CHANGELOG 已追加 v1.11
+- [x] `tasks.md` 中 T68 ~ T73 已标记完成
+- [ ] git tag `v1.11-complete` 已打 ← 由用户人工执行
+
+## v1.12 Harness 收口与验证门禁验收
+
+- [ ] AC-133: Given 任一 Agent 执行, When 组装 Prompt, Then 仅经由 `preparePrompt` 单一路径。
+- [ ] AC-134: Given 生产环境启动, When 构造 Verifier, Then LLM 非 nil，Standard/Complex 的 finding 经过对抗验证。
+- [ ] AC-135: Given `trivial_verifier=true` 的 Trivial PR, When 审查, Then 发现经过 Verifier。
+- [ ] AC-136: Given `trivial_verifier=false` 的 Trivial PR, When 审查, Then 不调用 Verifier。
+- [ ] AC-137: Given Agent 声称 finding 位于 `auth.go` 但未读取该文件, When 完成门禁, Then 状态降级为 `partial`，`ErrorReason = unverified_citation`。
+- [ ] AC-138: Given 所有引用文件均已被 `read_file` 读取, When 完成门禁, Then 状态保持 `completed`。
+
+## v1.12 迭代交付清单
+
+- [ ] AC-133 ~ AC-138 全部通过
+- [ ] `go build ./...` 通过
+- [ ] `go test ./...` 通过
+- [ ] `spec.md` 的 CHANGELOG 已追加 v1.12
+- [ ] `tasks.md` 中 T74 ~ T78 已标记完成
+- [ ] git tag `v1.12-complete` 已打 ← 由用户人工执行
+
+## v1.13 不可信输入隔离验收
+
+- [ ] AC-139: Given diff 中包含伪造的 UNTRUSTED 闭合标记, When 组装 Prompt, Then 内容仍位于随机边界之内。
+- [ ] AC-140: Given Agent 输出的 finding 路径不在 diff 文件集合中, When 校验, Then 该 finding 被丢弃并计入计数。
+- [ ] AC-141: Given Agent 输出包含工具调用指令字段, When 校验, Then 字段被剥离并记录告警。
+- [ ] AC-142: Given 注入回归样本集, When 运行 eval, Then 因注入输出 LGTM 的数量为 0。
+
+## v1.13 迭代交付清单
+
+- [ ] AC-139 ~ AC-142 全部通过
+- [ ] `go build ./...` 通过
+- [ ] `go test ./...` 通过
+- [ ] `spec.md` 的 CHANGELOG 已追加 v1.13
+- [ ] `tasks.md` 中 T79 ~ T82 已标记完成
+- [ ] git tag `v1.13-complete` 已打 ← 由用户人工执行
+
+## v1.14 工具面扩展与循环控制验收
+
+- [ ] AC-143: Given Agent 白名单不含 `git_blame`, When 调用, Then Harness 拒绝且工具未执行。
+- [ ] AC-144: Given 生产 `buildTools`, When 构造, Then 工具列表包含 `search_code` 与 `get_function_definition`。
+- [ ] AC-145: Given `./a.go` 与 `a.go` 交替调用, When 震荡检测, Then 视为同一指纹并中断。
+- [ ] AC-146: Given 单 Agent 工具调用超过 `max_tool_calls_per_agent`, When 继续调用, Then 中断为 `partial`，`ErrorReason = tool_budget_exhausted`。
+- [ ] AC-147: Given `git_blame` 作用于未跟踪文件, When 调用, Then 返回明确错误且不 panic。
+- [ ] AC-148: Given 路径参数以 `-` 或 `--` 开头, When 调用 git 工具, Then 请求被拒绝。
+
+## v1.14 迭代交付清单
+
+- [ ] AC-143 ~ AC-148 全部通过
+- [ ] `go build ./...` 通过
+- [ ] `go test ./...` 通过
+- [ ] `spec.md` 的 CHANGELOG 已追加 v1.14
+- [ ] `tasks.md` 中 T83 ~ T87 已标记完成
+- [ ] git tag `v1.14-complete` 已打 ← 由用户人工执行
+
+## v1.15 精确 Token 计量、项目规则与 PR 预算验收
+
+- [ ] AC-149: Given provider 为 OpenAI, When 计数, Then 使用精确 tokenizer；未配置时回退字符估算并记录日志。
+- [ ] AC-150: Given PR 修改了 `.codereviewagent/rules.md`, When 审查, Then 注入的规则为基准分支版本。
+- [ ] AC-151: Given 仓库无规则文件, When 审查, Then 无规则段且流程不报错。
+- [ ] AC-152: Given `budget.max_wall_seconds` 已超出, When 下一个 Agent 启动, Then 不再执行，状态 `partial`，记录 `budget_exhausted`。
+- [ ] AC-153: Given 规则文件超过 4000 字符, When 注入, Then 截断并告警。
+- [ ] AC-154: Given 预算配置全部为 0, When 审查, Then 行为与 v1.14 一致。
+
+## v1.15 迭代交付清单
+
+- [ ] AC-149 ~ AC-154 全部通过
+- [ ] `go build ./...` 通过
+- [ ] `go test ./...` 通过
+- [ ] `configs/config.yaml.example` 已追加 `budget` 与规则文件说明
+- [ ] `spec.md` 的 CHANGELOG 已追加 v1.15
+- [ ] `tasks.md` 中 T88 ~ T91 已标记完成
+- [ ] git tag `v1.15-complete` 已打 ← 由用户人工执行
+
+## v1.16 持久化任务队列与执行轨迹验收
+
+- [ ] AC-155: Given 同一 `(repo, pr, head_sha, action)` 的 webhook 连续到达, When 入队, Then 数据库仅一条记录。
+- [ ] AC-156: Given 进程在 job `running` 时被强制终止, When 重启, Then 该 job 恢复为 `queued` 并执行一次。
+- [ ] AC-157: Given job 连续失败 3 次, When 重试耗尽, Then 状态为 `dead` 且可在仪表盘查询。
+- [ ] AC-158: Given 5 步 ReAct 执行, When 完成, Then `agent_trace` 中有 5 条记录，`step_index` 连续。
+- [ ] AC-159: Given `agent_trace` 写入失败, When 审查, Then 审查继续完成，错误写入日志。
+- [ ] AC-160: Given webhook 请求合法, When 入队成功, Then 返回 202，且不依赖内存中的 goroutine 持有任务。
+
+## v1.16 迭代交付清单
+
+- [ ] AC-155 ~ AC-160 全部通过
+- [ ] `go build ./...` 通过
+- [ ] `go test ./...` 通过
+- [ ] `spec.md` 的 CHANGELOG 已追加 v1.16
+- [ ] `tasks.md` 中 T92 ~ T95 已标记完成
+- [ ] git tag `v1.16-complete` 已打 ← 由用户人工执行
+
+## v1.17 事件对账与指纹语义修正验收
+
+- [ ] AC-161: Given GitHub 存在某 synchronize 事件而本地 `review_jobs` 无记录, When 对账运行, Then 该事件被补入队列并执行。
+- [ ] AC-162: Given `closed` 任务首次执行失败, When 重试成功, Then `TrackOnClosed` 仅产生一次有效更新。
+- [ ] AC-163: Given `proposal.md` 未获批准, When 合并代码, Then 指纹格式变更不得合入（流程验收，由人工审查确认）。
+- [ ] AC-164: Given 同一静态问题因上方插入代码行号上移, When 计算 ID, Then ID 不变。
+- [ ] AC-165: Given 迁移完成, When 查询旧 ID, Then 可得到对应的新 ID。
+
+## v1.17 迭代交付清单
+
+- [ ] AC-161 ~ AC-165 全部通过
+- [ ] `go build ./...` 通过
+- [ ] `go test ./...` 通过
+- [ ] `spec.md` 的 CHANGELOG 已追加 v1.17
+- [ ] `tasks.md` 中 T96 ~ T99 已标记完成
+- [ ] git tag `v1.17-complete` 已打 ← 由用户人工执行

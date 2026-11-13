@@ -31,7 +31,7 @@ func TestCheckpointSaveAndGet(t *testing.T) {
 		PRNumber:     7,
 		HeadSHA:      "sha-7",
 		AgentName:    "security",
-		Status:       "success",
+		Status:       "completed",
 		ResultJSON:   []byte(`{"status":"completed","tool_call_count":2}`),
 	}
 	if err := repo.Save(ctx, cp); err != nil {
@@ -48,7 +48,7 @@ func TestCheckpointSaveAndGet(t *testing.T) {
 	if got.RepoFullName != "o/r" || got.PRNumber != 7 {
 		t.Errorf("checkpoint identity = %+v", got)
 	}
-	if got.Status != "success" {
+	if got.Status != "completed" {
 		t.Errorf("Status = %q, want success", got.Status)
 	}
 	if string(got.ResultJSON) == "" {
@@ -74,7 +74,7 @@ func TestCheckpointSaveUpsertsOnSameSHAAndAgent(t *testing.T) {
 
 	second := &Checkpoint{
 		RepoFullName: "o/r", PRNumber: 7, HeadSHA: "sha-8",
-		AgentName: "logic", Status: "success", ResultJSON: []byte(`{"status":"completed"}`),
+		AgentName: "logic", Status: "partial", ResultJSON: []byte(`{"status":"partial"}`),
 	}
 	if err := repo.Save(ctx, second); err != nil {
 		t.Fatalf("second Save: %v", err)
@@ -84,7 +84,7 @@ func TestCheckpointSaveUpsertsOnSameSHAAndAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBySHAAndAgent: %v", err)
 	}
-	if got.Status != "success" {
+	if got.Status != "completed" {
 		t.Errorf("Status = %q, want updated success", got.Status)
 	}
 	if string(got.ResultJSON) != `{"status": "completed"}` {
@@ -99,6 +99,35 @@ func TestCheckpointSaveUpsertsOnSameSHAAndAgent(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("checkpoint rows = %d, want 1 (unique constraint + upsert)", count)
+	}
+}
+
+func TestCheckpointFourPartKey(t *testing.T) {
+	repo, closeDB := newTestCheckpointRepo(t)
+	defer closeDB()
+	ctx := context.Background()
+
+	cp := &Checkpoint{
+		RepoFullName: "o/r", PRNumber: 1, HeadSHA: "sha-key", AgentName: "security",
+		Status: "completed", PromptHash: "prompt-a", ConfigHash: "config-a",
+		ResultJSON: []byte(`{"status":"completed"}`),
+	}
+	if err := repo.Save(ctx, cp); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := repo.GetBySHAAndAgentWithHashes(ctx, "sha-key", "security", "prompt-a", "config-a")
+	if err != nil {
+		t.Fatalf("GetBySHAAndAgentWithHashes: %v", err)
+	}
+	if got.PromptHash != "prompt-a" || got.ConfigHash != "config-a" {
+		t.Errorf("hashes = %s/%s, want prompt-a/config-a", got.PromptHash, got.ConfigHash)
+	}
+
+	// A changed prompt hash must miss the cache.
+	_, err = repo.GetBySHAAndAgentWithHashes(ctx, "sha-key", "security", "prompt-b", "config-a")
+	if err != pgx.ErrNoRows {
+		t.Errorf("changed prompt hash error = %v, want pgx.ErrNoRows", err)
 	}
 }
 

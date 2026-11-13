@@ -22,8 +22,12 @@ type Checkpoint struct {
 	HeadSHA string `json:"head_sha"`
 	// AgentName is the agent identifier, e.g. "security".
 	AgentName string `json:"agent_name"`
-	// Status is "success" or "failed".
+	// Status is "completed", "partial" or "failed" (v1.10 FR-64).
 	Status string `json:"status"`
+	// PromptHash is the SHA-256 of the agent prompt file (v1.10 FR-64).
+	PromptHash string `json:"prompt_hash"`
+	// ConfigHash is the SHA-256 of the behavior-affecting config subset.
+	ConfigHash string `json:"config_hash"`
 	// ResultJSON is the serialized harness.AgentResult.
 	ResultJSON []byte `json:"result_json"`
 	// CreatedAt is the last write time.
@@ -35,9 +39,12 @@ type Checkpoint struct {
 type CheckpointRepository interface {
 	// Save upserts a checkpoint keyed by (head_sha, agent_name).
 	Save(ctx context.Context, cp *Checkpoint) error
-	// GetBySHAAndAgent returns the checkpoint, or pgx.ErrNoRows when none
-	// exists.
+	// GetBySHAAndAgent returns the newest checkpoint for the SHA/agent, or
+	// pgx.ErrNoRows when none exists.
 	GetBySHAAndAgent(ctx context.Context, sha string, agent string) (*Checkpoint, error)
+	// GetBySHAAndAgentWithHashes returns the checkpoint matching the full
+	// v1.10 key (head SHA, agent, prompt hash, config hash).
+	GetBySHAAndAgentWithHashes(ctx context.Context, sha, agent, promptHash, configHash string) (*Checkpoint, error)
 }
 
 // CheckpointRepo implements CheckpointRepository on a pgx pool.
@@ -61,16 +68,17 @@ func (r *CheckpointRepo) Save(ctx context.Context, cp *Checkpoint) error {
 	}
 	err := r.pool.QueryRow(ctx, `
 		INSERT INTO harness_checkpoints
-			(repo_full_name, pr_number, head_sha, agent_name, status, result_json)
-		VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-		ON CONFLICT (head_sha, agent_name) DO UPDATE
+			(repo_full_name, pr_number, head_sha, agent_name, status, prompt_hash, config_hash, result_json)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+		ON CONFLICT (head_sha, agent_name, prompt_hash, config_hash) DO UPDATE
 		SET repo_full_name = EXCLUDED.repo_full_name,
 		    pr_number = EXCLUDED.pr_number,
 		    status = EXCLUDED.status,
 		    result_json = EXCLUDED.result_json,
 		    created_at = now()
 		RETURNING id`,
-		cp.RepoFullName, cp.PRNumber, cp.HeadSHA, cp.AgentName, cp.Status, string(cp.ResultJSON),
+		cp.RepoFullName, cp.PRNumber, cp.HeadSHA, cp.AgentName, cp.Status,
+		cp.PromptHash, cp.ConfigHash, string(cp.ResultJSON),
 	).Scan(&cp.ID)
 	if err != nil {
 		return fmt.Errorf("upsert checkpoint for %s/%s: %w", cp.HeadSHA, cp.AgentName, err)
@@ -82,16 +90,40 @@ func (r *CheckpointRepo) Save(ctx context.Context, cp *Checkpoint) error {
 func (r *CheckpointRepo) GetBySHAAndAgent(ctx context.Context, sha string, agent string) (*Checkpoint, error) {
 	var cp Checkpoint
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, repo_full_name, pr_number, head_sha, agent_name, status, result_json, created_at
+		SELECT id, repo_full_name, pr_number, head_sha, agent_name, status,
+		       prompt_hash, config_hash, result_json, created_at
 		FROM harness_checkpoints
-		WHERE head_sha = $1 AND agent_name = $2`, sha, agent,
+		WHERE head_sha = $1 AND agent_name = $2
+		ORDER BY created_at DESC
+		LIMIT 1`, sha, agent,
 	).Scan(&cp.ID, &cp.RepoFullName, &cp.PRNumber, &cp.HeadSHA, &cp.AgentName,
-		&cp.Status, &cp.ResultJSON, &cp.CreatedAt)
+		&cp.Status, &cp.PromptHash, &cp.ConfigHash, &cp.ResultJSON, &cp.CreatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, err
 		}
 		return nil, fmt.Errorf("select checkpoint %s/%s: %w", sha, agent, err)
+	}
+	return &cp, nil
+}
+
+// GetBySHAAndAgentWithHashes implements the v1.10 four-part checkpoint key.
+func (r *CheckpointRepo) GetBySHAAndAgentWithHashes(ctx context.Context, sha, agent, promptHash, configHash string) (*Checkpoint, error) {
+	var cp Checkpoint
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, repo_full_name, pr_number, head_sha, agent_name, status,
+		       prompt_hash, config_hash, result_json, created_at
+		FROM harness_checkpoints
+		WHERE head_sha = $1 AND agent_name = $2
+		  AND prompt_hash = $3 AND config_hash = $4`,
+		sha, agent, promptHash, configHash,
+	).Scan(&cp.ID, &cp.RepoFullName, &cp.PRNumber, &cp.HeadSHA, &cp.AgentName,
+		&cp.Status, &cp.PromptHash, &cp.ConfigHash, &cp.ResultJSON, &cp.CreatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, err
+		}
+		return nil, fmt.Errorf("select checkpoint %s/%s (%s,%s): %w", sha, agent, promptHash, configHash, err)
 	}
 	return &cp, nil
 }

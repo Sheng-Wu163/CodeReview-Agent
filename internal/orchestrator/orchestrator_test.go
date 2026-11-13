@@ -128,6 +128,10 @@ func (m *mockCheckpointStore) GetBySHAAndAgent(_ context.Context, sha string, ag
 	return &copied, nil
 }
 
+func (m *mockCheckpointStore) GetBySHAAndAgentWithHashes(ctx context.Context, sha, agent, _, _ string) (*repository.Checkpoint, error) {
+	return m.GetBySHAAndAgent(ctx, sha, agent)
+}
+
 func (m *mockCheckpointStore) seed(t *testing.T, sha, agent, status string, result harness.AgentResult) {
 	t.Helper()
 	data, err := json.Marshal(result)
@@ -180,6 +184,9 @@ func finding(agent, severity, msg string) agents.AgentFinding {
 func newTestOrchestrator(t *testing.T, reviewAgents []agents.ReviewAgent, v Verifier) *Orchestrator {
 	t.Helper()
 	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	var factory VerifierFactory
 	if v != nil {
 		factory = func(string) Verifier { return v }
@@ -708,7 +715,11 @@ func TestWrapToolsEmitsToolCall(t *testing.T) {
 
 // TestOrchestratorSavesCheckpointsForAllAgents verifies AC-113.
 func TestOrchestratorSavesCheckpointsForAllAgents(t *testing.T) {
-	agts, _ := fourAgents()
+	agts, byName := fourAgents()
+	for _, agent := range byName {
+		agent.useTools = true
+		agent.toolInput = "main.go"
+	}
 	o := newTestOrchestrator(t, agts, nil)
 	store := newMockCheckpointStore()
 	o.SetCheckpointStore(store)
@@ -727,8 +738,8 @@ func TestOrchestratorSavesCheckpointsForAllAgents(t *testing.T) {
 		if err != nil {
 			t.Fatalf("checkpoint %s: %v", name, err)
 		}
-		if cp.Status != "success" {
-			t.Errorf("checkpoint %s status = %q, want success", name, cp.Status)
+		if cp.Status != "completed" {
+			t.Errorf("checkpoint %s status = %q, want completed", name, cp.Status)
 		}
 	}
 }
@@ -739,7 +750,7 @@ func TestOrchestratorResumesCheckpoints(t *testing.T) {
 	agts, byName := fourAgents()
 	o := newTestOrchestrator(t, agts, passthroughVerifier{})
 	store := newMockCheckpointStore()
-	store.seed(t, "resume-sha", "security", "success", harness.AgentResult{
+	store.seed(t, "resume-sha", "security", "completed", harness.AgentResult{
 		Status:        harness.StatusCompleted,
 		Findings:      []agents.AgentFinding{finding("security", "critical", "cached security finding")},
 		ToolCallCount: 1,
@@ -782,7 +793,7 @@ func TestOrchestratorForceRerun(t *testing.T) {
 	agts, byName := fourAgents()
 	o := newTestOrchestrator(t, agts, nil)
 	store := newMockCheckpointStore()
-	store.seed(t, "force-sha", "security", "success", harness.AgentResult{
+	store.seed(t, "force-sha", "security", "completed", harness.AgentResult{
 		Status:        harness.StatusCompleted,
 		ToolCallCount: 1,
 	})
@@ -804,11 +815,11 @@ func TestOrchestratorForceRerunAgents(t *testing.T) {
 	agts, byName := fourAgents()
 	o := newTestOrchestrator(t, agts, nil)
 	store := newMockCheckpointStore()
-	store.seed(t, "force-agent-sha", "security", "success", harness.AgentResult{
+	store.seed(t, "force-agent-sha", "security", "completed", harness.AgentResult{
 		Status:        harness.StatusCompleted,
 		ToolCallCount: 1,
 	})
-	store.seed(t, "force-agent-sha", "logic", "success", harness.AgentResult{
+	store.seed(t, "force-agent-sha", "logic", "completed", harness.AgentResult{
 		Status:        harness.StatusCompleted,
 		ToolCallCount: 1,
 	})
@@ -852,5 +863,46 @@ func TestOrchestratorCheckpointsPersistBeforeVerification(t *testing.T) {
 	}
 	if verifier.calls != 1 {
 		t.Errorf("verifier calls = %d, want 1", verifier.calls)
+	}
+}
+
+func TestCollectPriorVerdicts(t *testing.T) {
+	dst := make(map[string]agents.PriorFindingVerdict)
+	findings := []agents.AgentFinding{
+		{Message: "new finding"},
+		{PriorFingerprint: "fixed-fp", Verdict: agents.VerdictFixed},
+		{PriorFingerprint: "unverifiable-fp", Verdict: agents.VerdictUnverifiable},
+		{PriorFingerprint: "still-fp", Verdict: agents.VerdictStillPresent, Message: "still"},
+	}
+	got := collectPriorVerdicts(findings, dst)
+
+	if len(got) != 2 {
+		t.Fatalf("kept findings = %d, want only the new and still_present entries", len(got))
+	}
+	if got[0].Message != "new finding" || got[1].Message != "still" {
+		t.Errorf("kept findings = %+v", got)
+	}
+	if dst["fixed-fp"] != agents.VerdictFixed || dst["still-fp"] != agents.VerdictStillPresent {
+		t.Errorf("verdicts = %+v", dst)
+	}
+}
+
+// AC-123: a partial checkpoint is re-executed instead of reused.
+func TestOrchestratorReRunsPartialCheckpoint(t *testing.T) {
+	agts, byName := fourAgents()
+	o := newTestOrchestrator(t, agts, nil)
+	store := newMockCheckpointStore()
+	store.seed(t, "partial-sha", "security", "partial", harness.AgentResult{
+		Status: harness.StatusPartial, ErrorReason: harness.ErrorReasonNoToolCalls,
+	})
+	o.SetCheckpointStore(store)
+
+	if _, err := o.Run(context.Background(), Input{
+		RepoFullName: "a/b", PRNumber: 1, HeadSHA: "partial-sha", DiffText: reviewDiff(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if byName["security"].callCount() != 1 {
+		t.Errorf("security calls = %d, want 1 (partial checkpoints are not reused)", byName["security"].callCount())
 	}
 }

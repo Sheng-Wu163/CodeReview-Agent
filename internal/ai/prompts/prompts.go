@@ -4,7 +4,9 @@
 package prompts
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 )
 
@@ -18,4 +20,15 @@ func Get(name string) (string, error) {
 		return "", fmt.Errorf("read prompt %q: %w", name, err)
 	}
 	return string(data), nil
+}
+
+// Hash returns the hex-encoded SHA-256 of the named prompt file. It is used
+// as the v1.10 checkpoint prompt_hash cache key.
+func Hash(name string) (string, error) {
+	data, err := promptsFS.ReadFile(name)
+	if err != nil {
+		return "", fmt.Errorf("read prompt %q: %w", name, err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }

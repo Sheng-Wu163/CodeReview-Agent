@@ -5,6 +5,8 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +38,16 @@ const duplicateWindow = 30 * time.Second
 // within the deduplication window (AC-25).
 var ErrDuplicatePR = errors.New("duplicate PR event within deduplication window, ignored")
 
+// ReviewScope is the range covered by one review (v1.10 FR-61).
+type ReviewScope string
+
+const (
+	// ScopeFull reviews the complete PR diff.
+	ScopeFull ReviewScope = "full"
+	// ScopeIncremental reviews only base..head.
+	ScopeIncremental ReviewScope = "incremental"
+)
+
 // Input describes one review request (FR-02).
 type Input struct {
 	// RepoFullName is the repository, e.g. "owner/repo".
@@ -51,6 +63,13 @@ type Input struct {
 	WorkspaceRoot string
 	// ForceRerun ignores stored checkpoints for this run (v1.8.1 FR-60).
 	ForceRerun bool
+	// Scope is "full" or "incremental" (v1.10 FR-61).
+	Scope ReviewScope
+	// ScopeReason explains a full-review fallback (v1.10 FR-61).
+	ScopeReason string
+	// PriorFindings are unresolved findings from the previous anchor
+	// (v1.10 FR-63).
+	PriorFindings []agents.PriorFinding
 }
 
 // CheckpointStore is the checkpoint persistence surface consumed by the
@@ -59,6 +78,8 @@ type Input struct {
 type CheckpointStore interface {
 	Save(ctx context.Context, cp *repository.Checkpoint) error
 	GetBySHAAndAgent(ctx context.Context, sha string, agent string) (*repository.Checkpoint, error)
+	// GetBySHAAndAgentWithHashes uses the v1.10 four-part cache key.
+	GetBySHAAndAgentWithHashes(ctx context.Context, sha, agent, promptHash, configHash string) (*repository.Checkpoint, error)
 }
 
 // Verifier is the verification step consumed by the orchestrator. The
@@ -130,6 +151,13 @@ type Result struct {
 	// AgentResults holds the structured Harness outcome of every executed
 	// agent (v1.8 FR-49), including tool-call logs.
 	AgentResults map[string]harness.AgentResult
+	// Scope is the review range used for this run (v1.10 FR-61).
+	Scope ReviewScope
+	// ScopeReason explains a full-review fallback.
+	ScopeReason string
+	// PriorVerdicts maps a prior-finding fingerprint to the agent verdict
+	// (v1.10 FR-63); used by the v1.11 thread closure.
+	PriorVerdicts map[string]agents.PriorFindingVerdict
 	// NoMeaningfulChanges is true when the diff contained no code changes
 	// (spec edge case: comment-only or whitespace-only diffs).
 	NoMeaningfulChanges bool
@@ -308,24 +336,27 @@ func (o *Orchestrator) shouldForceRerun(agentName string, in Input) bool {
 	return o.forceRerunAgents[agentName]
 }
 
-// loadCheckpoints returns cached successful agent results for the head SHA.
-// Failed checkpoints are never reused so the agent is retried (AC-114).
-func (o *Orchestrator) loadCheckpoints(ctx context.Context, in Input, names []string) map[string]harness.AgentResult {
+// loadCheckpoints returns cached completed agent results for the head SHA.
+// partial and failed checkpoints are never reused (v1.10 FR-64 / AC-123).
+func (o *Orchestrator) loadCheckpoints(ctx context.Context, in Input, enabled []agents.ReviewAgent) map[string]harness.AgentResult {
 	if o.checkpoints == nil || in.HeadSHA == "" {
 		return nil
 	}
+	configHash := o.behaviorConfigHash()
 	cached := make(map[string]harness.AgentResult)
-	for _, name := range names {
+	for _, agent := range enabled {
+		name := agent.Name()
 		if o.shouldForceRerun(name, in) {
 			continue
 		}
-		cp, err := o.checkpoints.GetBySHAAndAgent(ctx, in.HeadSHA, name)
+		promptHash := promptHashFor(agent)
+		cp, err := o.checkpoints.GetBySHAAndAgentWithHashes(ctx, in.HeadSHA, name, promptHash, configHash)
 		if err != nil {
 			// Not found is the common case; any lookup error degrades to a
 			// normal execution instead of failing the review.
 			continue
 		}
-		if cp.Status != "success" {
+		if cp.Status != string(harness.StatusCompleted) {
 			continue
 		}
 		var result harness.AgentResult
@@ -337,6 +368,47 @@ func (o *Orchestrator) loadCheckpoints(ctx context.Context, in Input, names []st
 		cached[name] = result
 	}
 	return cached
+}
+
+// promptHasher is implemented by real review agents; mocks without a prompt
+// file hash to the empty string.
+type promptHasher interface {
+	PromptHash() string
+}
+
+// promptHashFor returns the agent's prompt-file hash (v1.10 FR-64).
+func promptHashFor(agent agents.ReviewAgent) string {
+	if hasher, ok := agent.(promptHasher); ok {
+		return hasher.PromptHash()
+	}
+	return ""
+}
+
+// promptHashForName resolves the prompt hash of a configured agent.
+func (o *Orchestrator) promptHashForName(name string) string {
+	for _, agent := range o.agents {
+		if agent.Name() == name {
+			return promptHashFor(agent)
+		}
+	}
+	return ""
+}
+
+// behaviorConfigHash hashes the configuration subset that can change agent
+// output (v1.10 FR-64), so editing it invalidates cached results.
+func (o *Orchestrator) behaviorConfigHash() string {
+	payload, err := json.Marshal(struct {
+		Compression    config.CompressionConfig
+		StaticAnalysis config.StaticAnalysisConfig
+	}{
+		Compression:    o.compressionCfg,
+		StaticAnalysis: o.staticCfg,
+	})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 // saveCheckpoint persists one agent result immediately after execution
@@ -351,9 +423,9 @@ func (o *Orchestrator) saveCheckpoint(ctx context.Context, in Input, agentName s
 		o.logger.Sugar().Warnw("marshal checkpoint result", "agent", agentName, "error", err)
 		return
 	}
-	status := "success"
-	if result.Status == harness.StatusFailed {
-		status = "failed"
+	status := string(result.Status)
+	if status == "" {
+		status = string(harness.StatusFailed)
 	}
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
@@ -363,6 +435,8 @@ func (o *Orchestrator) saveCheckpoint(ctx context.Context, in Input, agentName s
 		HeadSHA:      in.HeadSHA,
 		AgentName:    agentName,
 		Status:       status,
+		PromptHash:   o.promptHashForName(agentName),
+		ConfigHash:   o.behaviorConfigHash(),
 		ResultJSON:   data,
 	}
 	if err := o.checkpoints.Save(saveCtx, cp); err != nil {
@@ -439,10 +513,17 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		return nil, err
 	}
 	start := time.Now()
+	scope := in.Scope
+	if scope == "" {
+		scope = ScopeFull
+	}
 	res := &Result{
-		Input:        in,
-		AgentErrors:  make(map[string]string),
-		AgentResults: make(map[string]harness.AgentResult),
+		Input:         in,
+		AgentErrors:   make(map[string]string),
+		AgentResults:  make(map[string]harness.AgentResult),
+		Scope:         scope,
+		ScopeReason:   in.ScopeReason,
+		PriorVerdicts: make(map[string]agents.PriorFindingVerdict),
 	}
 
 	// Step 2: parse the diff.
@@ -593,10 +674,12 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 	}
 
 	agentInput := agents.ReviewInput{
-		Diffs:       reviewable,
-		PreFindings: preFindings,
-		Context:     ctxBundle,
-		Tools:       agentTools,
+		Diffs:         reviewable,
+		PreFindings:   preFindings,
+		Context:       ctxBundle,
+		Tools:         agentTools,
+		PriorFindings: in.PriorFindings,
+		Scope:         string(scope),
 	}
 	var mu sync.Mutex
 	rawFindings := make([]agents.AgentFinding, 0)
@@ -604,13 +687,13 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 	// v1.8.1: load successful checkpoints before dispatching agents. Only
 	// completed/partial results were stored as "success"; failed agents are
 	// always retried (FR-58, AC-114).
-	enabledNames := make([]string, 0, len(o.agents))
+	enabledAgents := make([]agents.ReviewAgent, 0, len(o.agents))
 	for _, a := range o.agents {
 		if review.IsAgentEnabled(strategy, a.Name()) {
-			enabledNames = append(enabledNames, a.Name())
+			enabledAgents = append(enabledAgents, a)
 		}
 	}
-	cachedResults := o.loadCheckpoints(ctx, in, enabledNames)
+	cachedResults := o.loadCheckpoints(ctx, in, enabledAgents)
 
 	g := new(errgroup.Group)
 	for _, a := range o.agents {
@@ -625,12 +708,13 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 			mu.Lock()
 			res.AgentResults[agent.Name()] = cached
 			res.AgentStatus[agent.Name()] = "executed"
-			rawFindings = append(rawFindings, cached.Findings...)
+			cachedFindings := collectPriorVerdicts(cached.Findings, res.PriorVerdicts)
+			rawFindings = append(rawFindings, cachedFindings...)
 			mu.Unlock()
-			o.emitFindings(emit, cached.Findings)
+			o.emitFindings(emit, cachedFindings)
 			o.logger.Sugar().Infow("review agent restored from checkpoint",
 				"agent", agent.Name(),
-				"findings", len(cached.Findings),
+				"findings", len(cachedFindings),
 				"head_sha", in.HeadSHA)
 			continue
 		}
@@ -641,6 +725,7 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 			// event stream under this agent's name (v1.7 FR-44).
 			agentRunInput := agentInput
 			agentRunInput.Tools = wrapTools(agentInput.Tools, agent.Name(), emit)
+			agentRunInput.PriorFindings = priorFindingsForAgent(agentInput.PriorFindings, agent.Name())
 			result, err := o.runAgent(ctx, agent, agentRunInput)
 			// FR-59: persist the result immediately after this agent
 			// finishes, before waiting for the rest of the group.
@@ -672,7 +757,7 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 					"agent", agent.Name(), "reason", result.ErrorReason,
 					"tool_calls", result.ToolCallCount)
 			}
-			fnd := result.Findings
+			fnd := collectPriorVerdicts(result.Findings, res.PriorVerdicts)
 			rawFindings = append(rawFindings, fnd...)
 			o.emitFindings(emit, fnd)
 			o.logger.Sugar().Infow("review agent finished",
@@ -726,6 +811,42 @@ func (o *Orchestrator) Run(ctx context.Context, in Input) (*Result, error) {
 		"warnings":    warnings,
 	}})
 	return res, nil
+}
+
+// priorFindingsForAgent returns only the PRIOR_FINDINGS produced by this
+// agent (v1.10 D3). Entries without an agent (legacy data) are shared.
+func priorFindingsForAgent(prior []agents.PriorFinding, agentName string) []agents.PriorFinding {
+	if len(prior) == 0 {
+		return nil
+	}
+	out := make([]agents.PriorFinding, 0, len(prior))
+	for _, p := range prior {
+		if p.Agent == "" || p.Agent == agentName {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// collectPriorVerdicts separates PRIOR_FINDING verdicts from new findings
+// (v1.10 FR-63). fixed/unverifiable entries are not reported as new findings;
+// still_present entries stay in the finding stream.
+func collectPriorVerdicts(findings []agents.AgentFinding, dst map[string]agents.PriorFindingVerdict) []agents.AgentFinding {
+	out := make([]agents.AgentFinding, 0, len(findings))
+	for _, f := range findings {
+		if f.PriorFingerprint == "" {
+			out = append(out, f)
+			continue
+		}
+		dst[f.PriorFingerprint] = f.Verdict
+		if f.Verdict == agents.VerdictStillPresent {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // emitFindings pushes one finding event per finding. Cached and fresh

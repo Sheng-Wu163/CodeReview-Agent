@@ -39,6 +39,33 @@ const maxAgentIterations = 8
 // agent's Final Answer.
 const maxCompletionTokens = 16384
 
+// PriorFindingVerdict is the agent's judgement of a PRIOR_FINDING
+// (v1.10 FR-63).
+type PriorFindingVerdict string
+
+const (
+	// VerdictStillPresent means the issue still exists in the current code.
+	VerdictStillPresent PriorFindingVerdict = "still_present"
+	// VerdictFixed means the issue was fixed; the agent must cite the
+	// current-code evidence it read.
+	VerdictFixed PriorFindingVerdict = "fixed"
+	// VerdictUnverifiable means the agent could not validate the issue.
+	VerdictUnverifiable PriorFindingVerdict = "unverifiable"
+)
+
+// PriorFinding is one unresolved finding from the previous review anchor
+// (v1.10 FR-63). Fingerprint follows v1.11 FR-66.
+type PriorFinding struct {
+	Fingerprint string `json:"fingerprint"`
+	// Agent is the producing agent (v1.10 D3); each agent only receives
+	// its own PRIOR_FINDINGS.
+	Agent    string `json:"agent"`
+	FilePath string `json:"file_path"`
+	LineNumber  int    `json:"line_number"`
+	Severity    string `json:"severity"`
+	Message     string `json:"message"`
+}
+
 // AgentFinding is a single issue reported by a review agent. The JSON tags
 // define the schema the agents must emit in their Final Answer.
 type AgentFinding struct {
@@ -58,10 +85,19 @@ type AgentFinding struct {
 	Suggestion string `json:"suggestion"`
 	// Confidence is the agent's self-assessed confidence in [0,1].
 	Confidence float64 `json:"confidence"`
+
+	// PriorFingerprint identifies the PRIOR_FINDING this entry judges
+	// (v1.10 FR-63); empty for ordinary new findings.
+	PriorFingerprint string `json:"prior_fingerprint,omitempty"`
+	// Verdict is still_present/fixed/unverifiable for PRIOR_FINDING entries.
+	Verdict PriorFindingVerdict `json:"verdict,omitempty"`
+	// Evidence is the current code the agent read to justify "fixed".
+	Evidence string `json:"evidence,omitempty"`
 }
 
 // ReviewInput bundles everything a review agent needs for one run
-// (FR-21). The struct shape is FROZEN as of v1.3 (spec 11.3).
+// (FR-21). The v1.3 shape was extended in v1.10 with PriorFindings and Scope
+// via specs/changes/v1.10-prior-findings/proposal.md (approved).
 type ReviewInput struct {
 	// Diffs are the changed files under review.
 	Diffs []diff.FileDiff
@@ -75,6 +111,12 @@ type ReviewInput struct {
 	// Tools are the context-collection tools available to the agent
 	// (FR-11).
 	Tools []tools.Tool
+	// PriorFindings are unresolved findings from the previous anchor
+	// (v1.10 FR-63). Empty means the PRIOR_FINDINGS section is omitted.
+	PriorFindings []PriorFinding
+	// Scope is "full" or "incremental" (v1.10 FR-61); it is used only to
+	// declare the review range in the prompt.
+	Scope string
 }
 
 // ReviewAgent is the uniform interface implemented by every review agent
@@ -112,6 +154,16 @@ func newReviewAgent(name, promptFile string, llm llms.Model) reviewAgent {
 
 // Name implements ReviewAgent.
 func (a *reviewAgent) Name() string { return a.name }
+
+// PromptHash returns the SHA-256 of this agent's prompt file, used as the
+// v1.10 checkpoint prompt_hash.
+func (a *reviewAgent) PromptHash() string {
+	hash, err := prompts.Hash(a.promptFile)
+	if err != nil {
+		return ""
+	}
+	return hash
+}
 
 // Review implements ReviewAgent. It renders the diff and the static
 // analysis preFindings into the agent's question, runs the ReAct loop and
@@ -160,6 +212,7 @@ func (a *reviewAgent) Review(ctx context.Context, input ReviewInput) ([]AgentFin
 		if findings[i].Confidence > 1 {
 			findings[i].Confidence = 1
 		}
+		enforcePriorVerdict(&findings[i])
 	}
 	return findings, nil
 }
@@ -173,6 +226,26 @@ func loadPrompt(name string) (string, error) {
 	return system, nil
 }
 
+// enforcePriorVerdict applies the v1.10 parse-layer rule: a "fixed" verdict
+// is only accepted when the agent cites evidence read from the current code;
+// otherwise it is downgraded to "unverifiable". Unknown/missing verdicts on a
+// PRIOR_FINDING are also treated as unverifiable.
+func enforcePriorVerdict(f *AgentFinding) {
+	if f.PriorFingerprint == "" {
+		return
+	}
+	switch f.Verdict {
+	case VerdictStillPresent, VerdictUnverifiable:
+		return
+	case VerdictFixed:
+		if strings.TrimSpace(f.Evidence) == "" {
+			f.Verdict = VerdictUnverifiable
+		}
+	default:
+		f.Verdict = VerdictUnverifiable
+	}
+}
+
 // buildReviewQuestion assembles the full question fed to the ReAct loop:
 // the externalized system prompt followed by the three mandatory sections
 // (CLAUDE.v1.1.md): "## 代码变更", "## 静态分析发现" and, only when present,
@@ -184,9 +257,37 @@ func buildReviewQuestion(systemPrompt string, input ReviewInput) string {
 	b.WriteString(renderDiff(input.Diffs))
 	b.WriteString("\n")
 	b.WriteString(renderPreFindings(input.PreFindings))
+	if input.Scope == "incremental" {
+		b.WriteString("\n## 审查范围\n")
+		b.WriteString("本轮为增量审查：仅审查下方 diff 中的变更，diff 之外的代码不在本轮范围内。\n")
+	}
+	if len(input.PriorFindings) > 0 {
+		b.WriteString("\n")
+		b.WriteString(renderPriorFindings(input.PriorFindings))
+	}
 	if !input.Context.IsEmpty() {
 		b.WriteString("\n")
 		b.WriteString(renderContext(input.Context))
+	}
+	return b.String()
+}
+
+// renderPriorFindings renders the previous review's unresolved findings and
+// the mandatory verdict output contract (v1.10 FR-63).
+func renderPriorFindings(prior []PriorFinding) string {
+	var b strings.Builder
+	b.WriteString("## 上一轮遗留问题（PRIOR_FINDINGS）\n")
+	b.WriteString("逐条验证下列问题在当前代码中是否仍然存在。每个条目输出一个 JSON 对象（与普通 finding 放在同一数组中）：\n")
+	b.WriteString("{\"prior_fingerprint\":\"<原指纹>\",\"verdict\":\"still_present|fixed|unverifiable\",\"evidence\":\"<当前代码证据>\",\"severity\":\"...\",\"file_path\":\"...\",\"line_number\":1,\"message\":\"...\"}\n")
+	b.WriteString("规则：\n")
+	b.WriteString("- still_present：问题仍在，继续作为 finding 输出。\n")
+	b.WriteString("- fixed：问题已修复；evidence 必须是你通过工具读取到的当前代码，不能只凭 diff 未出现该行。\n")
+	b.WriteString("- unverifiable：文件无法读取或无法确认；不得判定为 fixed。\n")
+	b.WriteString("- 判为 fixed 的条目不要作为新 finding 输出。\n")
+	for _, p := range prior {
+		fmt.Fprintf(&b, "- fingerprint: %s\n", p.Fingerprint)
+		fmt.Fprintf(&b, "  location: %s:%d | severity: %s\n", p.FilePath, p.LineNumber, p.Severity)
+		fmt.Fprintf(&b, "  message: %s\n", p.Message)
 	}
 	return b.String()
 }

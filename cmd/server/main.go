@@ -71,6 +71,15 @@ func run() error {
 	defer pool.Close()
 
 	store = repository.NewReviewRepo(pool)
+	// v1.11 T68: one-time backfill of finding fingerprints for history.
+	backfillCtx, backfillCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	filled, backfillErr := repository.NewFindingRepo(pool).BackfillFingerprints(backfillCtx)
+	backfillCancel()
+	if backfillErr != nil {
+		logger.Sugar().Warnw("finding fingerprint backfill failed", "error", backfillErr)
+	} else if filled > 0 {
+		logger.Sugar().Infow("finding fingerprints backfilled", "count", filled)
+	}
 	dashboard, err := handler.NewDashboard(store, logger, "templates")
 	if err != nil {
 		return fmt.Errorf("create dashboard: %w", err)
@@ -186,5 +195,6 @@ func (a eventProcessorAdapter) Process(ctx context.Context, ev handler.PullReque
 		RepoFullName: ev.RepoFullName,
 		PRNumber:     ev.Number,
 		HeadSHA:      ev.HeadSHA,
+		BeforeSHA:    ev.BeforeSHA,
 	})
 }

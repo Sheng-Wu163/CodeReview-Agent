@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -22,6 +23,9 @@ type PullRequestEvent struct {
 	RepoFullName string `json:"repo_full_name"`
 	// HeadSHA is the head commit SHA of the PR.
 	HeadSHA string `json:"head_sha"`
+	// BeforeSHA is the previous commit SHA of a synchronize event; empty
+	// for opened events (v1.10 FR-61).
+	BeforeSHA string `json:"before_sha,omitempty"`
 }
 
 // PullRequestProcessor handles accepted pull_request events
@@ -82,12 +86,15 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	eventType := r.Header.Get("X-GitHub-Event")
 
-	body := make([]byte, r.ContentLength)
-	if r.ContentLength > 0 {
-		if _, err := r.Body.Read(body); err != nil && err.Error() != "EOF" {
-			http.Error(w, "failed to read request body", http.StatusBadRequest)
-			return
-		}
+	// Read the complete body in one call path (FR-65): a single Read may
+	// return fewer bytes than ContentLength (or nothing when ContentLength
+	// is -1 for chunked requests), which would truncate the payload used by
+	// JSON parsing. HMAC verification already happened on this same body.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		h.logger.Sugar().Errorw("failed to read webhook body", "error", err)
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
 	}
 
 	switch eventType {
@@ -117,6 +124,9 @@ func (h *Webhook) handlePullRequest(w http.ResponseWriter, _ *http.Request, body
 			Number:       payload.Number,
 			RepoFullName: payload.Repository.FullName,
 			HeadSHA:      payload.PullRequest.Head.SHA,
+		}
+		if payload.Action == "synchronize" {
+			event.BeforeSHA = payload.Before
 		}
 		h.logger.Sugar().Infow("pull_request event received, triggering review",
 			"action", event.Action,

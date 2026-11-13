@@ -379,6 +379,45 @@ func TestUpdateReviewAgentStatus(t *testing.T) {
 	}
 }
 
+// TestLatestCompletedReviewIgnoresFailedAndPending covers AC-119.
+func TestLatestCompletedReviewIgnoresFailedAndPending(t *testing.T) {
+	repo, cleanup := newTestRepo(t)
+	defer cleanup()
+	truncateReviews(t, repo)
+	ctx := context.Background()
+
+	completedID, err := repo.CreateReview(ctx, &Review{
+		RepoFullName: "anchor/repo", PRNumber: 7, HeadSHA: "old-head", Status: "completed",
+	})
+	if err != nil {
+		t.Fatalf("CreateReview completed: %v", err)
+	}
+	if err := repo.UpdateReviewAnchor(ctx, completedID, "anchor-sha", "base-old", "incremental", ""); err != nil {
+		t.Fatalf("UpdateReviewAnchor: %v", err)
+	}
+	if _, err := repo.CreateReview(ctx, &Review{
+		RepoFullName: "anchor/repo", PRNumber: 7, HeadSHA: "failed-head", Status: "failed",
+	}); err != nil {
+		t.Fatalf("CreateReview failed: %v", err)
+	}
+	if _, err := repo.CreateReview(ctx, &Review{
+		RepoFullName: "anchor/repo", PRNumber: 7, HeadSHA: "pending-head", Status: "pending",
+	}); err != nil {
+		t.Fatalf("CreateReview pending: %v", err)
+	}
+
+	anchor, err := repo.LatestCompletedReview(ctx, "anchor/repo", 7)
+	if err != nil {
+		t.Fatalf("LatestCompletedReview: %v", err)
+	}
+	if anchor.ID != completedID {
+		t.Errorf("anchor ID = %d, want the completed review %d", anchor.ID, completedID)
+	}
+	if anchor.ReviewedSHA != "anchor-sha" {
+		t.Errorf("ReviewedSHA = %q, want anchor-sha", anchor.ReviewedSHA)
+	}
+}
+
 func TestUpdateReviewAgentResults(t *testing.T) {
 	repo, cleanup := newTestRepo(t)
 	defer cleanup()

@@ -59,6 +59,35 @@ func (c *Client) GetPRHeadSHA(ctx context.Context, owner, repo string, number in
 	return pr.GetHead().GetSHA(), nil
 }
 
+// Compare errors (v1.10 FR-61). Callers fall back to a full review and
+// record the matching scope_reason.
+var (
+	// ErrCompareBaseUnreachable means the base SHA no longer exists
+	// (typically after a force-push).
+	ErrCompareBaseUnreachable = errors.New("compare base unreachable")
+	// ErrCompareLimit means the compare result exceeded GitHub's limits.
+	ErrCompareLimit = errors.New("compare result exceeds API limit")
+)
+
+// GetCompareDiff returns the unified diff between base and head using the
+// GitHub Compare API (v1.10 FR-61).
+func (c *Client) GetCompareDiff(ctx context.Context, owner, repo, base, head string) (string, error) {
+	diffText, resp, err := c.api.Repositories.CompareCommitsRaw(ctx, owner, repo, base, head,
+		gogithub.RawOptions{Type: gogithub.Diff})
+	if err != nil {
+		switch {
+		case resp != nil && resp.StatusCode == http.StatusNotFound:
+			return "", fmt.Errorf("%w: %s...%s", ErrCompareBaseUnreachable, base, head)
+		case resp != nil && (resp.StatusCode == http.StatusUnprocessableEntity ||
+			resp.StatusCode == http.StatusRequestEntityTooLarge):
+			return "", fmt.Errorf("%w: %s...%s", ErrCompareLimit, base, head)
+		default:
+			return "", fmt.Errorf("compare %s...%s (%s/%s): %w", base, head, owner, repo, err)
+		}
+	}
+	return diffText, nil
+}
+
 // ErrFileNotFound is returned by GetFileAtRef when the file does not exist
 // at the requested ref (e.g. it was deleted by a later commit) — the
 // implicit feedback tracker treats this as "file deleted" (v1.4 spec 15.4).

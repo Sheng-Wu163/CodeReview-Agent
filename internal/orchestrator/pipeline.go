@@ -3,14 +3,17 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 
 	"codereviewagent/internal/ai/agents"
 	"codereviewagent/internal/analysis"
 	"codereviewagent/internal/github"
 	"codereviewagent/internal/repository"
+	"codereviewagent/internal/review"
 	"codereviewagent/internal/vcs"
 )
 
@@ -18,6 +21,15 @@ import (
 // github.Client, mocked in tests. Defined in the consumer per convention.
 type GitHubAPI interface {
 	GetPRDiff(ctx context.Context, owner, repo string, number int) (string, error)
+	// GetCompareDiff returns base..head for incremental reviews (v1.10).
+	GetCompareDiff(ctx context.Context, owner, repo, base, head string) (string, error)
+	// ListReviewThreads reads existing review threads (v1.11 FR-67).
+	ListReviewThreads(ctx context.Context, owner, repo string, number int) ([]review.ThreadState, error)
+	// ResolveReviewThread closes a fixed thread (v1.11 FR-68).
+	ResolveReviewThread(ctx context.Context, threadID string) error
+	// SubmitReviewPlan publishes only new findings and applies the
+	// unresolved-critical event decision (v1.11 FR-67/FR-69).
+	SubmitReviewPlan(ctx context.Context, owner, repo string, number int, commitSHA string, plan review.PublishPlan, warnings []string) (string, error)
 	SubmitFindingsReview(ctx context.Context, owner, repo string, number int, commitSHA string, findings []agents.VerifiedFinding) (string, error)
 	// SubmitFindingsReviewWithWarnings posts the findings review with the
 	// v1.8 Harness warnings appended to the summary (FR-49 / AC-106).
@@ -41,6 +53,12 @@ type ReviewStore interface {
 	// UpdateReviewAgentResults persists the serialized structured Harness
 	// results of every executed agent (v1.8 FR-49 / 17.4 / T52).
 	UpdateReviewAgentResults(ctx context.Context, id int64, results string) error
+	// UpdateReviewAnchor persists the v1.10 scope/base anchor.
+	UpdateReviewAnchor(ctx context.Context, id int64, reviewedSHA, baseSHA, scope, scopeReason string) error
+	// LatestCompletedReview finds the previous completed anchor.
+	LatestCompletedReview(ctx context.Context, repo string, prNumber int) (*repository.Review, error)
+	// ListFindings loads the anchor review's findings.
+	ListFindings(ctx context.Context, reviewID int64) ([]repository.Finding, error)
 	CreateFinding(ctx context.Context, f *repository.Finding) (int64, error)
 }
 
@@ -49,6 +67,9 @@ type EventInput struct {
 	RepoFullName string
 	PRNumber     int
 	HeadSHA      string
+	// BeforeSHA is the synchronize event's previous SHA; empty for opened
+	// events (v1.10 FR-61).
+	BeforeSHA string
 }
 
 // Pipeline connects the webhook event to the full review flow:
@@ -106,21 +127,47 @@ func (p *Pipeline) Process(ctx context.Context, ev EventInput) {
 	}
 	defer cleanup()
 
-	// Fetch the diff (FR-03 input).
-	diffText, err := p.gh.GetPRDiff(ctx, owner, repoName, ev.PRNumber)
+	// v1.11: read existing threads before the run. Failure degrades to no
+	// deduplication instead of aborting the review (AC-131), and D4 uses the
+	// resolved threads to filter PRIOR_FINDINGS.
+	threads, threadErr := p.gh.ListReviewThreads(ctx, owner, repoName, ev.PRNumber)
+	if threadErr != nil {
+		log.Warnw("review thread read failed, publishing without deduplication", "error", threadErr)
+		threads = nil
+	}
+
+	// v1.10: resolve the previous completed anchor and choose the diff
+	// scope (FR-61/FR-62).
+	anchor, err := p.store.LatestCompletedReview(ctx, ev.RepoFullName, ev.PRNumber)
 	if err != nil {
-		log.Errorw("fetch PR diff", "error", err)
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Warnw("latest completed review lookup failed", "error", err)
+		}
+		anchor = nil
+	}
+
+	diffText, scope, baseSHA, scopeReason, err := p.resolveDiff(ctx, owner, repoName, ev, anchor)
+	if err != nil {
+		log.Errorw("fetch review diff", "error", err)
 		p.failReview(ctx, reviewID, owner, repoName, ev, "failed to fetch diff")
 		return
 	}
+	if err := p.store.UpdateReviewAnchor(ctx, reviewID, ev.HeadSHA, baseSHA, string(scope), scopeReason); err != nil {
+		log.Errorw("persist review anchor", "error", err)
+	}
 
-	// Run the full review pipeline.
+	priorFindings := p.loadPriorFindings(ctx, anchor, threads)
+
+	// Run the review pipeline.
 	res, err := p.orch.Run(ctx, Input{
 		RepoFullName:  ev.RepoFullName,
 		PRNumber:      ev.PRNumber,
 		HeadSHA:       ev.HeadSHA,
 		DiffText:      diffText,
 		WorkspaceRoot: root,
+		Scope:         scope,
+		ScopeReason:   scopeReason,
+		PriorFindings: priorFindings,
 	})
 	if err != nil {
 		log.Errorw("review pipeline failed", "error", err)
@@ -159,15 +206,20 @@ func (p *Pipeline) Process(ctx context.Context, ev EventInput) {
 
 	// Persist findings (FR-14).
 	for _, f := range res.Findings {
+		fingerprint := f.PriorFingerprint
+		if fingerprint == "" {
+			fingerprint = review.FindingFingerprint(f.FilePath, f.Agent, f.Message)
+		}
 		if _, err := p.store.CreateFinding(ctx, &repository.Finding{
-			ReviewID:   reviewID,
-			Agent:      f.Agent,
-			Severity:   f.Severity,
-			FilePath:   f.FilePath,
-			LineNumber: f.LineNumber,
-			Message:    f.Message,
-			Suggestion: f.Suggestion,
-			Confidence: f.Confidence,
+			ReviewID:    reviewID,
+			Agent:       f.Agent,
+			Severity:    f.Severity,
+			FilePath:    f.FilePath,
+			LineNumber:  f.LineNumber,
+			Message:     f.Message,
+			Suggestion:  f.Suggestion,
+			Confidence:  f.Confidence,
+			Fingerprint: fingerprint,
 		}); err != nil {
 			log.Errorw("persist finding", "error", err)
 		}
@@ -177,18 +229,36 @@ func (p *Pipeline) Process(ctx context.Context, ev EventInput) {
 	// Harness outcomes are surfaced in the review body (v1.8 FR-49 /
 	// AC-106).
 	warnings := res.AgentWarnings()
+	if threadErr != nil {
+		warnings = append(warnings, "⚠️ 线程读取失败，可能存在重复评论")
+	}
+
+	// v1.11: classify findings against existing threads. Only plan.New is
+	// submitted inline; persisting findings are counted, and fixed threads
+	// are resolved below.
+	plan := review.PlanPublish(res.Findings, threads, res.PriorVerdicts)
 	switch {
 	case res.NoMeaningfulChanges:
 		err = p.gh.SubmitNoMeaningfulChangesReview(ctx, owner, repoName, ev.PRNumber, ev.HeadSHA)
-	case len(warnings) > 0:
-		_, err = p.gh.SubmitFindingsReviewWithWarnings(ctx, owner, repoName, ev.PRNumber, ev.HeadSHA, res.Findings, warnings)
-	case len(res.Findings) == 0:
+	case threadErr == nil && len(plan.New) == 0 && len(plan.Persisting) == 0 &&
+		len(plan.Resolved) == 0 && len(warnings) == 0:
 		err = p.gh.SubmitLGTMReview(ctx, owner, repoName, ev.PRNumber, ev.HeadSHA)
 	default:
-		_, err = p.gh.SubmitFindingsReview(ctx, owner, repoName, ev.PRNumber, ev.HeadSHA, res.Findings)
+		_, err = p.gh.SubmitReviewPlan(ctx, owner, repoName, ev.PRNumber, ev.HeadSHA, plan, warnings)
 	}
 	if err != nil {
 		log.Errorw("submit PR review", "error", err)
+	}
+
+	// v1.11 FR-68: resolve only threads whose PRIOR_FINDING was judged
+	// fixed. Failures are logged and never block the review.
+	for _, thread := range plan.Resolved {
+		if res.PriorVerdicts[thread.Fingerprint] != agents.VerdictFixed {
+			continue
+		}
+		if err := p.gh.ResolveReviewThread(ctx, thread.ThreadID); err != nil {
+			log.Warnw("resolve review thread failed", "thread", thread.ThreadID, "error", err)
+		}
 	}
 
 	// Commit status (FR-12 / AC-11 / AC-17).
@@ -220,6 +290,81 @@ func (p *Pipeline) failReview(ctx context.Context, reviewID int64, owner, repoNa
 		"CodeReviewAgent failed: "+reason); err != nil {
 		p.logger.Sugar().Errorw("update commit status", "error", err)
 	}
+}
+
+// resolveDiff selects the v1.10 review base and diff (FR-61). The
+// reviewed_sha anchor takes priority over the webhook before SHA, covering
+// reviews skipped by failed runs or lost webhooks.
+func (p *Pipeline) resolveDiff(ctx context.Context, owner, repo string, ev EventInput, anchor *repository.Review) (string, ReviewScope, string, string, error) {
+	base := ev.BeforeSHA
+	if anchor != nil && anchor.ReviewedSHA != "" {
+		base = anchor.ReviewedSHA
+	}
+
+	// No usable base, or a re-run of the same commit: review the full PR.
+	if base == "" || base == ev.HeadSHA {
+		diffText, err := p.gh.GetPRDiff(ctx, owner, repo, ev.PRNumber)
+		return diffText, ScopeFull, "", "no_base", err
+	}
+
+	diffText, err := p.gh.GetCompareDiff(ctx, owner, repo, base, ev.HeadSHA)
+	if err == nil {
+		return diffText, ScopeIncremental, base, "", nil
+	}
+
+	reason := "before_unreachable"
+	if errors.Is(err, github.ErrCompareLimit) {
+		reason = "compare_limit"
+	} else if !errors.Is(err, github.ErrCompareBaseUnreachable) {
+		p.logger.Sugar().Warnw("compare API failed, falling back to full review",
+			"base", base, "head", ev.HeadSHA, "error", err)
+	}
+	fullDiff, fullErr := p.gh.GetPRDiff(ctx, owner, repo, ev.PRNumber)
+	return fullDiff, ScopeFull, "", reason, fullErr
+}
+
+// loadPriorFindings loads the anchor's unresolved findings for PRIOR_FINDINGS
+// injection (v1.10 FR-63). accepted_implicit findings and findings whose
+// thread a human already resolved are skipped (D4).
+func (p *Pipeline) loadPriorFindings(ctx context.Context, anchor *repository.Review, threads []review.ThreadState) []agents.PriorFinding {
+	if anchor == nil {
+		return nil
+	}
+	findings, err := p.store.ListFindings(ctx, anchor.ID)
+	if err != nil {
+		p.logger.Sugar().Warnw("load anchor findings failed", "review", anchor.ID, "error", err)
+		return nil
+	}
+
+	resolvedFingerprints := make(map[string]bool)
+	for _, thread := range threads {
+		if thread.IsResolved && thread.Fingerprint != "" {
+			resolvedFingerprints[thread.Fingerprint] = true
+		}
+	}
+
+	prior := make([]agents.PriorFinding, 0, len(findings))
+	for _, f := range findings {
+		if f.FeedbackStatus == "accepted_implicit" {
+			continue
+		}
+		fingerprint := f.Fingerprint
+		if fingerprint == "" {
+			fingerprint = review.FindingFingerprint(f.FilePath, f.Agent, f.Message)
+		}
+		if resolvedFingerprints[fingerprint] {
+			continue
+		}
+		prior = append(prior, agents.PriorFinding{
+			Fingerprint: fingerprint,
+			Agent:       f.Agent,
+			FilePath:    f.FilePath,
+			LineNumber:  f.LineNumber,
+			Severity:    f.Severity,
+			Message:     f.Message,
+		})
+	}
+	return prior
 }
 
 // splitRepo splits "owner/repo".

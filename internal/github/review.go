@@ -8,6 +8,7 @@ import (
 	gogithub "github.com/google/go-github/v66/github"
 
 	"codereviewagent/internal/ai/agents"
+	"codereviewagent/internal/review"
 )
 
 // Review event types for the Pull Request Review API.
@@ -42,6 +43,9 @@ func FormatFinding(f agents.VerifiedFinding) string {
 	}
 	fmt.Fprintf(&b, "\n(Severity: %s, Confidence: %.2f, Agent: %s)",
 		f.Severity, f.Confidence, f.Agent)
+	// Hidden identity marker used to match later review threads by
+	// fingerprint instead of line number (v1.11 FR-67).
+	fmt.Fprintf(&b, "\n\n<!-- cra-fp:%s -->", review.EffectiveFingerprint(f))
 	return b.String()
 }
 
@@ -166,6 +170,46 @@ func (c *Client) SubmitFindingsReviewWithWarnings(ctx context.Context, owner, re
 		return "", fmt.Errorf("create review %s/%s#%d: %w", owner, repo, number, err)
 	}
 	return event, nil
+}
+
+// SubmitReviewPlan submits the deduplicated v1.11 publication plan: only
+// plan.New receives inline comments, the summary counts persisting and
+// resolved threads, and the review event follows PlanPublish's decision
+// (FR-67/FR-69).
+func (c *Client) SubmitReviewPlan(ctx context.Context, owner, repo string, number int, commitSHA string, plan review.PublishPlan, warnings []string) (string, error) {
+	event := plan.Event
+	if event == "" {
+		event = reviewEventComment
+	}
+	body := BuildPlanSummary(plan, warnings)
+	req := &gogithub.PullRequestReviewRequest{
+		CommitID: gogithub.String(commitSHA),
+		Body:     gogithub.String(body),
+		Event:    gogithub.String(event),
+	}
+	for _, f := range plan.New {
+		req.Comments = append(req.Comments, &gogithub.DraftReviewComment{
+			Path: gogithub.String(f.FilePath),
+			Line: gogithub.Int(f.LineNumber),
+			Body: gogithub.String(FormatFinding(f)),
+		})
+	}
+	if _, _, err := c.api.PullRequests.CreateReview(ctx, owner, repo, number, req); err != nil {
+		return "", fmt.Errorf("create review %s/%s#%d: %w", owner, repo, number, err)
+	}
+	return event, nil
+}
+
+// BuildPlanSummary renders the v1.11 review summary.
+func BuildPlanSummary(plan review.PublishPlan, warnings []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "CodeReviewAgent: %d new, %d persisting, %d resolved issue(s).",
+		len(plan.New), len(plan.Persisting), len(plan.Resolved))
+	if len(warnings) > 0 {
+		b.WriteString("\n\n")
+		b.WriteString(strings.Join(warnings, "\n"))
+	}
+	return b.String()
 }
 
 // SubmitLGTMReview posts the "LGTM" review used when no issues were found

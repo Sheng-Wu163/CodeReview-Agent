@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,17 +19,49 @@ import (
 
 	"codereviewagent/internal/ai/agents"
 	itools "codereviewagent/internal/ai/tools"
+	"codereviewagent/internal/github"
 	"codereviewagent/internal/repository"
 	"codereviewagent/internal/review"
 )
 
 // mockGitHub implements GitHubAPI, recording all calls.
 type mockGitHub struct {
-	mu       sync.Mutex
-	diff     string
-	diffErr  error
-	reviews  []map[string]any
-	statuses [][2]string // state, description
+	mu          sync.Mutex
+	diff        string
+	diffErr     error
+	compareDiff string
+	compareErr  error
+	threads     []review.ThreadState
+	threadsErr  error
+	resolved    []string
+	reviews     []map[string]any
+	statuses    [][2]string // state, description
+}
+
+func (m *mockGitHub) GetCompareDiff(_ context.Context, _, _, _, _ string) (string, error) {
+	return m.compareDiff, m.compareErr
+}
+
+func (m *mockGitHub) ListReviewThreads(_ context.Context, _, _ string, _ int) ([]review.ThreadState, error) {
+	return m.threads, m.threadsErr
+}
+
+func (m *mockGitHub) ResolveReviewThread(_ context.Context, threadID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resolved = append(m.resolved, threadID)
+	return nil
+}
+
+func (m *mockGitHub) SubmitReviewPlan(_ context.Context, _, _ string, _ int, _ string, plan review.PublishPlan, warnings []string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reviews = append(m.reviews, map[string]any{
+		"kind": "findings", "count": len(plan.New), "findings": plan.New,
+		"persisting": plan.Persisting, "resolved": plan.Resolved,
+		"event": plan.Event, "warnings": warnings,
+	})
+	return plan.Event, nil
 }
 
 func (m *mockGitHub) GetPRDiff(_ context.Context, _, _ string, _ int) (string, error) {
@@ -89,6 +122,8 @@ type mockStore struct {
 	nextID   int64
 	reviews  map[int64]*repository.Review
 	findings []repository.Finding
+	// latestCompleted is returned by LatestCompletedReview when set.
+	latestCompleted *repository.Review
 }
 
 func newMockStore() *mockStore {
@@ -151,6 +186,42 @@ func (m *mockStore) UpdateReviewAgentResults(_ context.Context, id int64, result
 	}
 	rev.AgentResults = results
 	return nil
+}
+
+func (m *mockStore) UpdateReviewAnchor(_ context.Context, id int64, reviewedSHA, baseSHA, scope, scopeReason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rev := m.reviews[id]
+	if rev == nil {
+		return fmt.Errorf("review %d not found", id)
+	}
+	rev.ReviewedSHA = reviewedSHA
+	rev.BaseSHA = baseSHA
+	rev.Scope = scope
+	rev.ScopeReason = scopeReason
+	return nil
+}
+
+func (m *mockStore) LatestCompletedReview(_ context.Context, _ string, _ int) (*repository.Review, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.latestCompleted == nil {
+		return nil, fmt.Errorf("no completed review")
+	}
+	copied := *m.latestCompleted
+	return &copied, nil
+}
+
+func (m *mockStore) ListFindings(_ context.Context, reviewID int64) ([]repository.Finding, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []repository.Finding
+	for _, f := range m.findings {
+		if f.ReviewID == reviewID {
+			out = append(out, f)
+		}
+	}
+	return out, nil
 }
 
 func (m *mockStore) CreateFinding(_ context.Context, f *repository.Finding) (int64, error) {
@@ -361,6 +432,194 @@ func TestPipelineRecordsFailedAgentAndWarns(t *testing.T) {
 	}
 	if rev.Status != "completed" {
 		t.Errorf("review status = %q, want completed", rev.Status)
+	}
+}
+
+// AC-117: a reachable anchor uses the Compare API and records incremental
+// scope.
+func TestPipelineIncrementalUsesCompare(t *testing.T) {
+	repoDir, commitSHA := buildLocalRepo(t)
+	gh := &mockGitHub{diff: "this is not a diff", compareDiff: testDiff}
+	store := newMockStore()
+	store.latestCompleted = &repository.Review{
+		ID: 99, RepoFullName: "o/r", PRNumber: 1, HeadSHA: "old-head",
+		Status: "completed", ReviewedSHA: "anchor-sha",
+	}
+	empty := []agents.AgentFinding{}
+	p := newTestPipeline(t, gh, store, &empty)
+	p.SetCloneURL(repoDir)
+
+	p.Process(context.Background(), EventInput{
+		RepoFullName: "o/r", PRNumber: 1, HeadSHA: commitSHA, BeforeSHA: "before-sha",
+	})
+
+	store.mu.Lock()
+	rev := store.reviews[1]
+	store.mu.Unlock()
+	if rev == nil {
+		t.Fatal("review record not created")
+	}
+	if rev.Scope != "incremental" {
+		t.Errorf("Scope = %q, want incremental", rev.Scope)
+	}
+	if rev.BaseSHA != "anchor-sha" {
+		t.Errorf("BaseSHA = %q, want anchor-sha (anchor takes priority over before)", rev.BaseSHA)
+	}
+	if rev.ScopeReason != "" {
+		t.Errorf("ScopeReason = %q, want empty", rev.ScopeReason)
+	}
+	if rev.Status != "completed" {
+		t.Errorf("Status = %q, want completed (full fallback would fail to parse)", rev.Status)
+	}
+}
+
+// AC-118: an unreachable base falls back to the full diff.
+func TestPipelineFallsBackWhenBaseUnreachable(t *testing.T) {
+	repoDir, commitSHA := buildLocalRepo(t)
+	gh := &mockGitHub{diff: testDiff, compareErr: github.ErrCompareBaseUnreachable}
+	store := newMockStore()
+	empty := []agents.AgentFinding{}
+	p := newTestPipeline(t, gh, store, &empty)
+	p.SetCloneURL(repoDir)
+
+	p.Process(context.Background(), EventInput{
+		RepoFullName: "o/r", PRNumber: 1, HeadSHA: commitSHA, BeforeSHA: "gone-sha",
+	})
+
+	store.mu.Lock()
+	rev := store.reviews[1]
+	store.mu.Unlock()
+	if rev.Scope != "full" {
+		t.Errorf("Scope = %q, want full", rev.Scope)
+	}
+	if rev.ScopeReason != "before_unreachable" {
+		t.Errorf("ScopeReason = %q, want before_unreachable", rev.ScopeReason)
+	}
+}
+
+// AC-126: an existing thread suppresses the duplicate inline comment.
+func TestPipelineDeduplicatesExistingThreads(t *testing.T) {
+	repoDir, commitSHA := buildLocalRepo(t)
+	gh := &mockGitHub{diff: testDiff}
+	finding := agents.AgentFinding{
+		Agent: "security", Severity: agents.SeverityCritical,
+		FilePath: "users.go", LineNumber: 2, Message: "SQL injection",
+		CodeSnippet: `db.Query("SELECT * FROM users WHERE id = " + userID)`,
+		Confidence:  0.9,
+	}
+	gh.threads = []review.ThreadState{{
+		ThreadID: "t1", Fingerprint: review.FindingFingerprint(finding.FilePath, finding.Agent, finding.Message),
+		Path: "users.go", Line: 2, IsResolved: false,
+	}}
+	store := newMockStore()
+	findings := []agents.AgentFinding{finding}
+	p := newTestPipeline(t, gh, store, &findings)
+	p.SetCloneURL(repoDir)
+
+	p.Process(context.Background(), EventInput{RepoFullName: "o/r", PRNumber: 1, HeadSHA: commitSHA})
+
+	gh.mu.Lock()
+	last := gh.reviews[len(gh.reviews)-1]
+	gh.mu.Unlock()
+	if last["count"].(int) != 0 {
+		t.Errorf("new inline comments = %v, want 0", last["count"])
+	}
+	if persisting, _ := last["persisting"].([]agents.VerifiedFinding); len(persisting) != 1 {
+		t.Errorf("persisting = %v, want 1", last["persisting"])
+	}
+}
+
+// AC-127: only the genuinely new finding is submitted.
+func TestPipelineSubmitsOnlyNewFinding(t *testing.T) {
+	repoDir, commitSHA := buildLocalRepo(t)
+	existing := agents.AgentFinding{
+		Agent: "logic", Severity: agents.SeverityWarning,
+		FilePath: "users.go", LineNumber: 2, Message: "existing issue", Confidence: 0.8,
+	}
+	fresh := agents.AgentFinding{
+		Agent: "security", Severity: agents.SeverityCritical,
+		FilePath: "users.go", LineNumber: 2, Message: "brand new issue",
+		CodeSnippet: `db.Query("SELECT * FROM users WHERE id = " + userID)`, Confidence: 0.9,
+	}
+	gh := &mockGitHub{diff: testDiff, threads: []review.ThreadState{{
+		ThreadID: "t1", Fingerprint: review.FindingFingerprint(existing.FilePath, existing.Agent, existing.Message),
+		Path: "users.go", Line: 2,
+	}}}
+	store := newMockStore()
+	findings := []agents.AgentFinding{existing, fresh}
+	p := newTestPipeline(t, gh, store, &findings)
+	p.SetCloneURL(repoDir)
+
+	p.Process(context.Background(), EventInput{RepoFullName: "o/r", PRNumber: 1, HeadSHA: commitSHA})
+
+	gh.mu.Lock()
+	last := gh.reviews[len(gh.reviews)-1]
+	gh.mu.Unlock()
+	if last["count"].(int) != 1 {
+		t.Errorf("new inline comments = %v, want 1", last["count"])
+	}
+	submitted := last["findings"].([]agents.VerifiedFinding)
+	if submitted[0].Message != "brand new issue" {
+		t.Errorf("submitted = %+v, want only the new finding", submitted)
+	}
+}
+
+// AC-131: a thread-read failure degrades to publishing every finding.
+func TestPipelineThreadReadFailureFallsBack(t *testing.T) {
+	repoDir, commitSHA := buildLocalRepo(t)
+	finding := agents.AgentFinding{
+		Agent: "security", Severity: agents.SeverityCritical,
+		FilePath: "users.go", LineNumber: 2, Message: "SQL injection",
+		CodeSnippet: `db.Query("SELECT * FROM users WHERE id = " + userID)`, Confidence: 0.9,
+	}
+	gh := &mockGitHub{diff: testDiff, threadsErr: errors.New("rate limited")}
+	store := newMockStore()
+	findings := []agents.AgentFinding{finding}
+	p := newTestPipeline(t, gh, store, &findings)
+	p.SetCloneURL(repoDir)
+
+	p.Process(context.Background(), EventInput{RepoFullName: "o/r", PRNumber: 1, HeadSHA: commitSHA})
+
+	gh.mu.Lock()
+	last := gh.reviews[len(gh.reviews)-1]
+	gh.mu.Unlock()
+	if last["count"].(int) != 1 {
+		t.Errorf("new inline comments = %v, want 1 (no dedup fallback)", last["count"])
+	}
+	warnings, _ := last["warnings"].([]string)
+	if !strings.Contains(strings.Join(warnings, "\n"), "线程读取失败") {
+		t.Errorf("warnings = %v, want thread-read warning", warnings)
+	}
+}
+
+// AC-128: a fixed PRIOR_FINDING resolves its open thread.
+func TestPipelineResolvesFixedThread(t *testing.T) {
+	repoDir, commitSHA := buildLocalRepo(t)
+	gh := &mockGitHub{diff: testDiff, threads: []review.ThreadState{{
+		ThreadID: "t-fixed", Fingerprint: "fp-fixed", Path: "users.go", Line: 2, IsResolved: false,
+	}}}
+	store := newMockStore()
+	verdictFinding := agents.AgentFinding{
+		Agent: "security", Severity: agents.SeverityCritical,
+		FilePath: "users.go", LineNumber: 2, Message: "was here",
+		PriorFingerprint: "fp-fixed", Verdict: agents.VerdictFixed,
+		Evidence: "current code no longer contains the query", Confidence: 0.9,
+	}
+	findings := []agents.AgentFinding{verdictFinding}
+	p := newTestPipeline(t, gh, store, &findings)
+	p.SetCloneURL(repoDir)
+
+	p.Process(context.Background(), EventInput{RepoFullName: "o/r", PRNumber: 1, HeadSHA: commitSHA})
+
+	gh.mu.Lock()
+	resolved := append([]string(nil), gh.resolved...)
+	last := gh.reviews[len(gh.reviews)-1]
+	gh.mu.Unlock()
+	if len(resolved) != 1 || resolved[0] != "t-fixed" {
+		t.Errorf("resolved = %v, want [t-fixed]", resolved)
+	}
+	if last["event"] != "COMMENT" {
+		t.Errorf("event = %v, want COMMENT", last["event"])
 	}
 }
 
