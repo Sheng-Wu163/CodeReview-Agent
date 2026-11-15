@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -229,6 +230,13 @@ func (p *Pipeline) Process(ctx context.Context, ev EventInput) {
 	// Harness outcomes are surfaced in the review body (v1.8 FR-49 /
 	// AC-106).
 	warnings := res.AgentWarnings()
+	dropped := 0
+	for _, result := range res.AgentResults {
+		dropped += result.DroppedFindings
+	}
+	if dropped > 0 {
+		warnings = append(warnings, fmt.Sprintf("⚠️ 已丢弃 %d 条结构不合法的 finding", dropped))
+	}
 	if threadErr != nil {
 		warnings = append(warnings, "⚠️ 线程读取失败，可能存在重复评论")
 	}

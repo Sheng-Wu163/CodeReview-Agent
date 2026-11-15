@@ -60,6 +60,9 @@ type AgentResult struct {
 	Findings []agents.AgentFinding `json:"findings,omitempty"`
 	// ToolCallCount is the number of logical tool invocations.
 	ToolCallCount int `json:"tool_call_count"`
+	// DroppedFindings counts structurally invalid findings removed before
+	// verification (v1.13 FR-75).
+	DroppedFindings int `json:"dropped_findings,omitempty"`
 	// ErrorReason explains a failed or partial outcome.
 	ErrorReason string `json:"error_reason,omitempty"`
 	// ExecutionLogs records every tool-call fingerprint.

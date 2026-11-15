@@ -498,18 +498,23 @@
 
 ## v1.13 不可信输入隔离验收
 
-- [ ] AC-139: Given diff 中包含伪造的 UNTRUSTED 闭合标记, When 组装 Prompt, Then 内容仍位于随机边界之内。
-- [ ] AC-140: Given Agent 输出的 finding 路径不在 diff 文件集合中, When 校验, Then 该 finding 被丢弃并计入计数。
-- [ ] AC-141: Given Agent 输出包含工具调用指令字段, When 校验, Then 字段被剥离并记录告警。
-- [ ] AC-142: Given 注入回归样本集, When 运行 eval, Then 因注入输出 LGTM 的数量为 0。
+- [x] AC-139: Given diff 中包含伪造的 UNTRUSTED 闭合标记, When 组装 Prompt, Then 内容仍位于随机边界之内。
+  - ✅ `TestWrapUntrustedForgedClosingMarker` + `TestWrapUntrusted`
+- [x] AC-140: Given Agent 输出的 finding 路径不在 diff 文件集合中, When 校验, Then 该 finding 被丢弃并计入计数。
+  - ✅ `TestStructuralValidator` + `TestExecuteDropsStructurallyInvalidFindings`（`AgentResult.DroppedFindings`）
+- [x] AC-141: Given Agent 输出包含工具调用指令字段, When 校验, Then 字段被剥离并记录告警。
+  - ✅ `TestStripNonWhitelistedFindingFields`；解析层统一剥离，Pipeline 在 summary 中告警丢弃数量
+- [x] AC-142: Given 注入回归样本集, When 运行 eval, Then 因注入输出 LGTM 的数量为 0。
+  - ✅ 新增 `eval/dataset/injection-*` 三个样本；`TestEvaluateCountsInjectionSuccesses` + `injection_success_count` 报告指标
 
 ## v1.13 迭代交付清单
 
-- [ ] AC-139 ~ AC-142 全部通过
-- [ ] `go build ./...` 通过
-- [ ] `go test ./...` 通过
-- [ ] `spec.md` 的 CHANGELOG 已追加 v1.13
-- [ ] `tasks.md` 中 T79 ~ T82 已标记完成
+- [x] AC-139 ~ AC-142 全部通过
+- [x] `go build ./...` 通过
+- [x] `go test ./...` 通过（本机无 gcc，`-race` 需在具备 cgo 的环境补充执行）
+- [x] 变更提案 `specs/changes/v1.13-output-validation/proposal.md` 已获批准
+- [x] `spec.md` 的 CHANGELOG 已追加 v1.13
+- [x] `tasks.md` 中 T79 ~ T82 已标记完成
 - [ ] git tag `v1.13-complete` 已打 ← 由用户人工执行
 
 ## v1.14 工具面扩展与循环控制验收

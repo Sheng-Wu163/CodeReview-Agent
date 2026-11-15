@@ -13,6 +13,7 @@ import (
 
 	"codereviewagent/internal/ai/agents"
 	ctxcontext "codereviewagent/internal/context"
+	"codereviewagent/internal/diff"
 )
 
 // stubTool is a scripted tools.Tool. The first failTimes calls fail.
@@ -361,6 +362,42 @@ func TestExecuteCitationGate(t *testing.T) {
 				t.Errorf("UnverifiedCitation = %v, want %v", res.Findings[0].UnverifiedCitation, tt.wantFlag)
 			}
 		})
+	}
+}
+
+// AC-140: findings outside the diff set are dropped and counted before the
+// verifier.
+func TestExecuteDropsStructurallyInvalidFindings(t *testing.T) {
+	tool := &stubTool{name: "read_file"}
+	agent := &scriptedAgent{name: "security", run: func(ctx context.Context, input agents.ReviewInput) ([]agents.AgentFinding, error) {
+		if _, err := input.Tools[0].Call(ctx, "main.go"); err != nil {
+			return nil, err
+		}
+		return []agents.AgentFinding{{
+			Agent: "security", Severity: agents.SeverityCritical,
+			FilePath: "auth.go", LineNumber: 1, Message: "outside diff", Confidence: 0.9,
+		}}, nil
+	}}
+	diffs := []diff.FileDiff{{
+		Path: "main.go",
+		Hunks: []diff.Hunk{{
+			NewStartLine: 1, NewLines: 2,
+		}},
+	}}
+
+	h := New(zap.NewNop(), WithRetryPolicy(0, time.Millisecond))
+	res, err := h.Execute(context.Background(), agent, agents.ReviewInput{
+		Tools: []ltools.Tool{tool},
+		Diffs: diffs,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(res.Findings) != 0 {
+		t.Errorf("findings = %d, want 0 after validation", len(res.Findings))
+	}
+	if res.DroppedFindings != 1 {
+		t.Errorf("DroppedFindings = %d, want 1", res.DroppedFindings)
 	}
 }
 

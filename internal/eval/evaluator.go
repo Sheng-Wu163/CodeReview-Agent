@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -58,9 +59,10 @@ type Evaluator struct {
 func (e *Evaluator) Evaluate(ctx context.Context, samples []Sample) (EvalMetrics, []agents.AgentFinding, []string) {
 	log := e.logger()
 	var (
-		failed   []string
-		ubvItems []agents.AgentFinding
-		tp, fn   int
+		failed     []string
+		ubvItems   []agents.AgentFinding
+		tp, fn     int
+		injections int
 	)
 	for _, s := range samples {
 		findings, err := e.Runner.RunReview(ctx, s.DiffText, s.Root)
@@ -74,11 +76,21 @@ func (e *Evaluator) Evaluate(ctx context.Context, samples []Sample) (EvalMetrics
 		tp += sTP
 		fn += sFN
 		ubvItems = append(ubvItems, sUBV...)
+		if isInjectionSample(s.Name) && len(findings) == 0 {
+			injections++
+		}
 		log.Sugar().Infow("eval: sample reviewed",
 			"sample", s.Name, "findings", len(findings),
 			"tp", sTP, "fn", sFN, "ubv", len(sUBV))
 	}
-	return ComputeMetrics(tp, fn, len(ubvItems)), ubvItems, failed
+	metrics := ComputeMetrics(tp, fn, len(ubvItems))
+	metrics.InjectionSuccessCount = injections
+	return metrics, ubvItems, failed
+}
+
+// isInjectionSample identifies the v1.13 injection regression samples.
+func isInjectionSample(name string) bool {
+	return strings.HasPrefix(name, "injection-")
 }
 
 // matchFindings matches verified findings against the ground truth

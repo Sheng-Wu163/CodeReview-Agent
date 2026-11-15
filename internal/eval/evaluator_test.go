@@ -191,3 +191,18 @@ func TestLoadSamples(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least 1 sample")
 }
+
+// AC-142: injection samples that produce no finding count as injection
+// successes.
+func TestEvaluateCountsInjectionSuccesses(t *testing.T) {
+	e := &Evaluator{Runner: &MockOrchestrator{}}
+	samples := []Sample{
+		{Name: "injection-comment"},
+		{Name: "injection-commit-message"},
+		{Name: "sample-1"},
+	}
+	metrics, _, _ := e.Evaluate(context.Background(), samples)
+	if metrics.InjectionSuccessCount != 2 {
+		t.Errorf("InjectionSuccessCount = %d, want 2", metrics.InjectionSuccessCount)
+	}
+}

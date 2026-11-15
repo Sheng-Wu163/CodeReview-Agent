@@ -60,11 +60,11 @@ type PriorFinding struct {
 	Fingerprint string `json:"fingerprint"`
 	// Agent is the producing agent (v1.10 D3); each agent only receives
 	// its own PRIOR_FINDINGS.
-	Agent    string `json:"agent"`
-	FilePath string `json:"file_path"`
-	LineNumber  int    `json:"line_number"`
-	Severity    string `json:"severity"`
-	Message     string `json:"message"`
+	Agent      string `json:"agent"`
+	FilePath   string `json:"file_path"`
+	LineNumber int    `json:"line_number"`
+	Severity   string `json:"severity"`
+	Message    string `json:"message"`
 }
 
 // AgentFinding is a single issue reported by a review agent. The JSON tags
@@ -284,9 +284,14 @@ func enforcePriorVerdict(f *AgentFinding) {
 // tests), it still goes through the same ContextAssembler implementation,
 // so there is exactly one assembly path in production (v1.12 FR-71).
 func (a *reviewAgent) prepareQuestion(ctx context.Context, systemPrompt string, input ReviewInput) (string, error) {
+	nonce, err := newNonce()
+	if err != nil {
+		return "", err
+	}
+	systemPrompt += untrustedSystemDeclaration
 	blocks := []ctxcontext.ContextBlock{
 		{Source: ctxcontext.SourceSystem, Content: systemPrompt, IsPinned: true, Sequence: 0},
-		{Source: ctxcontext.SourceTaskState, Content: renderTaskState(input), IsPinned: true, Sequence: 1},
+		{Source: ctxcontext.SourceTaskState, Content: renderTaskState(input, nonce), IsPinned: true, Sequence: 1},
 	}
 	if preparer, ok := a.promptPreparer(); ok {
 		return preparer(ctx, blocks)
@@ -297,23 +302,33 @@ func (a *reviewAgent) prepareQuestion(ctx context.Context, systemPrompt string, 
 
 // renderTaskState renders the pinned task section: diff, static-analysis
 // findings, the incremental scope declaration and prior findings.
-func renderTaskState(input ReviewInput) string {
+func renderTaskState(input ReviewInput, nonce string) string {
 	var b strings.Builder
 	b.WriteString("## 代码变更\n")
-	b.WriteString(renderDiff(input.Diffs))
+	b.WriteString(wrapSection("diff", renderDiff(input.Diffs), nonce))
+	b.WriteString("\n## 静态分析发现\n")
+	b.WriteString("Findings below were produced by deterministic tools. Verify each one against the code, then add issues the tools cannot see.\n")
+	b.WriteString(wrapSection("static_analysis", renderPreFindingsData(input.PreFindings), nonce))
 	b.WriteString("\n")
-	b.WriteString(renderPreFindings(input.PreFindings))
 	if input.Scope == "incremental" {
 		b.WriteString("\n## 审查范围\n")
 		b.WriteString("本轮为增量审查：仅审查下方 diff 中的变更，diff 之外的代码不在本轮范围内。\n")
 	}
 	if len(input.PriorFindings) > 0 {
-		b.WriteString("\n")
-		b.WriteString(renderPriorFindings(input.PriorFindings))
+		b.WriteString("\n## 上一轮遗留问题（PRIOR_FINDINGS）\n")
+		b.WriteString("逐条验证下列问题在当前代码中是否仍然存在。每个条目输出一个 JSON 对象（与普通 finding 放在同一数组中）：\n")
+		b.WriteString("{\"prior_fingerprint\":\"<原指纹>\",\"verdict\":\"still_present|fixed|unverifiable\",\"evidence\":\"<当前代码证据>\",\"severity\":\"...\",\"file_path\":\"...\",\"line_number\":1,\"message\":\"...\"}\n")
+		b.WriteString("规则：\n")
+		b.WriteString("- still_present：问题仍在，继续作为 finding 输出。\n")
+		b.WriteString("- fixed：问题已修复；evidence 必须是你通过工具读取到的当前代码，不能只凭 diff 未出现该行。\n")
+		b.WriteString("- unverifiable：文件无法读取或无法确认；不得判定为 fixed。\n")
+		b.WriteString("- 判为 fixed 的条目不要作为新 finding 输出。\n")
+		b.WriteString(wrapSection("prior_findings", renderPriorFindingsData(input.PriorFindings), nonce))
 	}
 	if !input.Context.IsEmpty() {
-		b.WriteString("\n")
-		b.WriteString(renderContext(input.Context))
+		b.WriteString("\n## 补充上下文\n")
+		b.WriteString("Retrieved by static analysis for reference only (may be incomplete).\n")
+		b.WriteString(wrapSection("context", renderContextData(input.Context), nonce))
 	}
 	return b.String()
 }
@@ -329,18 +344,10 @@ func buildReviewQuestion(systemPrompt string, input ReviewInput) string {
 	return question
 }
 
-// renderPriorFindings renders the previous review's unresolved findings and
-// the mandatory verdict output contract (v1.10 FR-63).
-func renderPriorFindings(prior []PriorFinding) string {
+// renderPriorFindingsData renders only the prior-finding data; the output
+// contract stays outside the UNTRUSTED boundary.
+func renderPriorFindingsData(prior []PriorFinding) string {
 	var b strings.Builder
-	b.WriteString("## 上一轮遗留问题（PRIOR_FINDINGS）\n")
-	b.WriteString("逐条验证下列问题在当前代码中是否仍然存在。每个条目输出一个 JSON 对象（与普通 finding 放在同一数组中）：\n")
-	b.WriteString("{\"prior_fingerprint\":\"<原指纹>\",\"verdict\":\"still_present|fixed|unverifiable\",\"evidence\":\"<当前代码证据>\",\"severity\":\"...\",\"file_path\":\"...\",\"line_number\":1,\"message\":\"...\"}\n")
-	b.WriteString("规则：\n")
-	b.WriteString("- still_present：问题仍在，继续作为 finding 输出。\n")
-	b.WriteString("- fixed：问题已修复；evidence 必须是你通过工具读取到的当前代码，不能只凭 diff 未出现该行。\n")
-	b.WriteString("- unverifiable：文件无法读取或无法确认；不得判定为 fixed。\n")
-	b.WriteString("- 判为 fixed 的条目不要作为新 finding 输出。\n")
 	for _, p := range prior {
 		fmt.Fprintf(&b, "- fingerprint: %s\n", p.Fingerprint)
 		fmt.Fprintf(&b, "  location: %s:%d | severity: %s\n", p.FilePath, p.LineNumber, p.Severity)
@@ -352,11 +359,8 @@ func renderPriorFindings(prior []PriorFinding) string {
 // renderContext renders the local context bundle under the "## 补充上下文"
 // section. It is only called for a non-empty bundle: an empty bundle must
 // not render the section at all (CLAUDE.v1.1.md token-saving rule).
-func renderContext(bundle ctxcontext.ContextBundle) string {
+func renderContextData(bundle ctxcontext.ContextBundle) string {
 	var b strings.Builder
-	b.WriteString("## 补充上下文\n")
-	b.WriteString("Retrieved by static analysis for reference only (may be incomplete).\n")
-
 	if len(bundle.Changes) > 0 {
 		b.WriteString("### 结构性变更\n")
 		for _, c := range bundle.Changes {
@@ -381,17 +385,15 @@ func renderContext(bundle ctxcontext.ContextBundle) string {
 	return b.String()
 }
 
-// renderPreFindings renders the static analysis preFindings as a structured
-// list under the mandatory "## 静态分析发现" section header (FR-22, CLAUDE.md
-// v1.3 prompt template rule).
-func renderPreFindings(preFindings []analysis.PreAnalysisFinding) string {
+// renderPreFindingsData renders only the static-analysis data; the
+// mandatory section header and instructions stay outside the UNTRUSTED
+// boundary.
+func renderPreFindingsData(preFindings []analysis.PreAnalysisFinding) string {
 	var b strings.Builder
-	b.WriteString("## 静态分析发现\n")
 	if len(preFindings) == 0 {
 		b.WriteString("(none - the static analysis pipeline reported no issues for these files)\n")
 		return b.String()
 	}
-	b.WriteString("Findings below were produced by deterministic tools. Verify each one against the code, then add issues the tools cannot see.\n")
 	for _, pf := range preFindings {
 		fmt.Fprintf(&b, "- ID: %s\n", pf.ID)
 		fmt.Fprintf(&b, "  severity: %s | tool: %s | rule: %s\n", pf.Severity, pf.Tool, pf.RuleID)
@@ -451,9 +453,21 @@ func parseFindings(output string) ([]AgentFinding, error) {
 		return nil, fmt.Errorf("no JSON array in final answer: %q", truncate(output, 200))
 	}
 	decoder := json.NewDecoder(strings.NewReader(cleaned[start:]))
-	var findings []AgentFinding
-	if err := decoder.Decode(&findings); err != nil {
+	var raw []json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decode findings JSON: %w", err)
+	}
+	findings := make([]AgentFinding, 0, len(raw))
+	for _, item := range raw {
+		clean, _, err := StripNonWhitelistedFindingFields(item)
+		if err != nil {
+			return nil, err
+		}
+		var finding AgentFinding
+		if err := json.Unmarshal(clean, &finding); err != nil {
+			return nil, fmt.Errorf("decode finding JSON: %w", err)
+		}
+		findings = append(findings, finding)
 	}
 	return findings, nil
 }

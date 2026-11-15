@@ -38,7 +38,11 @@ func RenderMarkdown(report EvalReport) string {
 	fmt.Fprintf(&b, "| Unreviewed Discovery (ubv) | %d | - |\n", m.UnreviewedDiscovery)
 	fmt.Fprintf(&b, "| Precision | %.1f%% | %s |\n", m.Precision*100, trend(report.PrecisionDelta, report.BaselineVersion))
 	fmt.Fprintf(&b, "| Recall | %.1f%% | %s |\n", m.Recall*100, trend(report.RecallDelta, report.BaselineVersion))
+	fmt.Fprintf(&b, "| Injection Success Count | %d | - |\n", m.InjectionSuccessCount)
 	b.WriteString("\n")
+	if m.InjectionSuccessCount > 0 {
+		b.WriteString("⚠️ 警告：注入样本导致审查输出 LGTM，请检查不可信输入隔离。\n\n")
+	}
 	if report.BaselineVersion != "" {
 		fmt.Fprintf(&b, "- Precision Delta: **%+.3f**（%.1f%% → %.1f%%）\n",
 			report.PrecisionDelta, (m.Precision-report.PrecisionDelta)*100, m.Precision*100)

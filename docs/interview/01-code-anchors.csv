@@ -1,0 +1,273 @@
+anchor_id,组件,路径:行号,符号,说明,证据等级
+A001,服务入口,cmd/server/main.go:31,main,进程入口,已验证
+A002,服务装配,cmd/server/main.go:38,run,连接DB、迁移、装配orchestrator/pipeline/路由并启动HTTP,已验证
+A003,DB连接与迁移,cmd/server/main.go:66,db.MigrateFromURL,启动即迁移,已验证
+A004,LLM初始化,cmd/server/main.go:91,ai.NewLLM,按provider构造LLM客户端,已验证
+A005,Verifier条件装配,cmd/server/main.go:104-109,verifierFactory,仅当verifier.enabled为true时构造工厂,已验证
+A006,Verifier配置校验,cmd/server/main.go:95,cfg.ValidateVerifier,启用时要求LLM非nil,已验证
+A007,Orchestrator装配,cmd/server/main.go:110,orchestrator.New,注入4个Agent与verifierFactory,已验证
+A008,Checkpoint装配,cmd/server/main.go:113,orch.SetCheckpointStore,注入CheckpointRepo,已验证
+A009,Pipeline装配,cmd/server/main.go:124,orchestrator.NewPipeline,注入GitHub客户端与ReviewRepo,已验证
+A010,SSE事件桥接,cmd/server/main.go:133-140,routeEvent,事件按repo#pr路由到broker,已验证
+A011,健康检查路由,cmd/server/main.go:51,r.Get /healthz,无鉴权,已验证
+A012,Webhook路由,cmd/server/main.go:144-145,r.With(HMACVerify).Post /webhook,唯一带签名校验的业务入口,已验证
+A013,SSE路由,cmd/server/main.go:141,handler.MountStreamReview,无鉴权中间件,已验证
+A014,静态资源路由,cmd/server/main.go:142,handler.MountStatic,无鉴权,已验证
+A015,HMAC签名校验,internal/middleware/hmac.go:20,HMACVerify,X-Hub-Signature-256校验中间件,已验证
+A016,HMAC比较,internal/middleware/hmac.go:58,hmac.Equal,常量时间比较,已验证
+A017,Webhook处理,internal/handler/webhook.go:81,Webhook.ServeHTTP,按X-GitHub-Event分发,已验证
+A018,Webhook请求体读取,internal/handler/webhook.go:93,io.ReadAll,完整读取body后再做签名与解析,已验证
+A019,Webhook PR分发,internal/handler/webhook.go:113,handlePullRequest,opened/synchronize启动审查，closed记录反馈,已验证
+A020,Webhook异步审查,internal/handler/webhook.go:141,go func(),独立goroutine调用Process，超时10分钟，无recover,已验证
+A021,Webhook同步反馈,internal/handler/webhook.go:183,dispatchTrackOnSynchronize,后台goroutine调用Tracker,已验证
+A022,Webhook关闭反馈,internal/handler/webhook.go:197,dispatchTrackOnClosed,后台goroutine调用Tracker,已验证
+A023,PR事件结构,internal/handler/webhook.go:17,PullRequestEvent,webhook到处理器的事件结构,已验证
+A024,处理器接口,internal/handler/webhook.go:34,PullRequestProcessor,消费方定义的接口,已验证
+A025,审查流水线入口,internal/orchestrator/pipeline.go:100,Pipeline.Process,落库pending到回写评论的完整流程,已验证
+A026,流水线结构,internal/orchestrator/pipeline.go:79,Pipeline,无任何锁字段，不含per-PR互斥,已验证
+A027,创建审查记录,internal/orchestrator/pipeline.go:111,ReviewStore.CreateReview,写入pending状态,已验证
+A028,工作区准备,internal/orchestrator/pipeline.go:123,vcs.PrepareWorkspace,每次审查全量clone,已验证
+A029,读取既有线程,internal/orchestrator/pipeline.go:134,GitHubAPI.ListReviewThreads,失败降级为不去重,已验证
+A030,取上一锚点,internal/orchestrator/pipeline.go:142,ReviewStore.LatestCompletedReview,只取status=completed,已验证
+A031,diff选择,internal/orchestrator/pipeline.go:306,Pipeline.resolveDiff,reviewed_sha优先于before_sha，不可达回退全量,已验证
+A032,写入锚点,internal/orchestrator/pipeline.go:156,ReviewStore.UpdateReviewAnchor,持久化reviewed_sha与scope,已验证
+A033,PRIOR加载,internal/orchestrator/pipeline.go:337,Pipeline.loadPriorFindings,跳过accepted_implicit与人工已resolve线程,已验证
+A034,调用Orchestrator,internal/orchestrator/pipeline.go:163,orch.Run,审查主流程,已验证
+A035,持久化Findings,internal/orchestrator/pipeline.go:209,ReviewStore.CreateFinding,逐条写入，单条失败只记日志,已验证
+A036,回写计划,internal/orchestrator/pipeline.go:247,review.PlanPublish,按指纹分为new/persisting/resolved,已验证
+A037,提交Review,internal/orchestrator/pipeline.go:255,GitHubAPI.SubmitReviewPlan,先写GitHub后写DB最终状态,已验证
+A038,关闭线程,internal/orchestrator/pipeline.go:267,GitHubAPI.ResolveReviewThread,仅对PriorVerdict为fixed的线程,已验证
+A039,失败收尾,internal/orchestrator/pipeline.go:292,Pipeline.failReview,写failed状态并设置failure commit status,已验证
+A040,完成收尾,internal/orchestrator/pipeline.go:281,ReviewStore.UpdateReviewStatus,最终写completed,已验证
+A041,Orchestrator结构,internal/orchestrator/orchestrator.go:210,Orchestrator,含lastSeen、runner、checkpoints等字段,已验证
+A042,审查主流程,internal/orchestrator/orchestrator.go:511,Orchestrator.Run,Step2至Step7顺序执行,已验证
+A043,重复触发检查,internal/orchestrator/orchestrator.go:925,Orchestrator.checkDuplicate,同head_sha 30秒内返回ErrDuplicatePR,已验证
+A044,去重窗口常量,internal/orchestrator/orchestrator.go:35,duplicateWindow,值为30秒,已验证
+A045,重复错误,internal/orchestrator/orchestrator.go:39,ErrDuplicatePR,重复事件的错误值,已验证
+A046,内存去重表,internal/orchestrator/orchestrator.go:248,Orchestrator.lastSeen,map只写不清理,已验证
+A047,Diff解析,internal/orchestrator/orchestrator.go:530,diff.Parse,Step2,已验证
+A048,文件过滤,internal/orchestrator/orchestrator.go:553,filter.ShouldInclude,Step3，跳过二进制与过滤文件,已验证
+A049,复杂度策略,internal/orchestrator/orchestrator.go:576,Orchestrator.selectStrategy,Step3.4，决定启用哪些Agent与是否启用Verifier,已验证
+A050,无实质变更短路,internal/orchestrator/orchestrator.go:602,NoMeaningfulChanges gate,注释或空白改动直接跳过,已验证
+A051,静态分析前置,internal/orchestrator/orchestrator.go:628,analysisFactory,Step3.5，失败降级为纯LLM,已验证
+A052,上下文注入,internal/orchestrator/orchestrator.go:657,contextFactory,Step3.6，失败降级为空bundle,已验证
+A053,并行Agent组,internal/orchestrator/orchestrator.go:698,errgroup.Group,Step4+5，单Agent失败不导致组失败,已验证
+A054,Checkpoint读取,internal/orchestrator/orchestrator.go:341,Orchestrator.loadCheckpoints,在派发前读取缓存结果,已验证
+A055,Checkpoint复用条件,internal/orchestrator/orchestrator.go:359,cp.Status != completed,只复用completed,已验证
+A056,缓存配置哈希,internal/orchestrator/orchestrator.go:399,Orchestrator.behaviorConfigHash,只哈希Compression与StaticAnalysis，不含模型与verifier,已验证
+A057,Checkpoint写入,internal/orchestrator/orchestrator.go:417,Orchestrator.saveCheckpoint,每个Agent完成后立即写,已验证
+A058,写入脱离取消,internal/orchestrator/orchestrator.go:430,context.WithoutCancel,写入超时5秒,已验证
+A059,Verifier步骤,internal/orchestrator/orchestrator.go:779,switch Step6,Trivial跳过Verifier，否则调用工厂,已验证
+A060,Verifier缺失分支,internal/orchestrator/orchestrator.go:785-794,verifier != nil && len(rawFindings) > 0,verifier为nil时res.Findings不被赋值，发现被静默丢弃,已验证
+A061,结果排序,internal/orchestrator/orchestrator.go:798,sortFindings,按严重度与置信度排序,已验证
+A062,Agent执行入口,internal/orchestrator/orchestrator.go:902,Orchestrator.runAgent,委托给Harness,已验证
+A063,生产工具集,internal/orchestrator/orchestrator.go:914,Orchestrator.buildTools,仅挂载ReadFileTool,已验证
+A064,审查结果结构,internal/orchestrator/orchestrator.go:129,Result,包含AgentStatus与AgentResults,已验证
+A065,审查输入结构,internal/orchestrator/orchestrator.go:52,Input,单次审查请求,已验证
+A066,Agent警告渲染,internal/orchestrator/orchestrator.go:180,Result.AgentWarnings,failed与partial渲染为中文警告,已验证
+A067,Harness执行器,internal/harness/harness_impl.go:32,Executor,Harness实现,已验证
+A068,执行器构造,internal/harness/harness_impl.go:99,harness.New,接收Option,已验证
+A069,超时选项,internal/harness/harness_impl.go:54,WithTimeout,Agent级超时,已验证
+A070,工具超时选项,internal/harness/harness_impl.go:60,WithToolTimeout,单次工具调用超时,已验证
+A071,重试选项,internal/harness/harness_impl.go:66,WithRetryPolicy,仅只读工具重试,已验证
+A072,压缩选项,internal/harness/harness_impl.go:80,WithCompression,设置上下文压缩参数,已验证
+A073,只读工具选项,internal/harness/harness_impl.go:89,WithReadOnlyTools,声明哪些工具可重试,已验证
+A074,Harness执行,internal/harness/harness_impl.go:131,Executor.Execute,包装工具、调用Agent、门禁、状态映射,已验证
+A075,Prompt装配注入,internal/harness/harness_impl.go:152,SetPromptPreparer,把preparePrompt注入Agent,已验证
+A076,结构校验调用,internal/harness/harness_impl.go:157,StructuralValidator.Validate,在验证器之前执行,已验证
+A077,零工具门禁,internal/harness/harness_impl.go:194,ErrorReasonNoToolCalls,无工具调用降级为partial,已验证
+A078,引用证据门禁,internal/harness/harness_impl.go:202-220,citation gate,引用未读文件则partial并标记UnverifiedCitation,已验证
+A079,零工具原因码,internal/harness/harness_impl.go:20,ErrorReasonNoToolCalls,值为suspicious_no_tool_calls,已验证
+A080,工具包装,internal/harness/harness_impl.go:226,Executor.governTools,包装每个工具为governedTool,已验证
+A081,工具调用治理,internal/harness/harness_impl.go:287,governedTool.Call,校验空参数、重试、记录、震荡检测,已验证
+A082,只读重试循环,internal/harness/harness_impl.go:306-336,retry loop,指数退避，基数由retryBaseDelay给定,已验证
+A083,单次调用超时,internal/harness/harness_impl.go:351,governedTool.callOnce,context.WithTimeout,已验证
+A084,震荡检测调用,internal/harness/harness_impl.go:344,DetectOscillation,每次调用后检查,已验证
+A085,调用记录器,internal/harness/harness_impl.go:239,recorder,带mutex的调用日志,已验证
+A086,Prompt装配,internal/harness/harness_impl.go:125,Executor.preparePrompt,调用context.Assembler,已验证
+A087,Agent结果结构,internal/harness/types.go:56,AgentResult,Status/Findings/ToolCallCount/ErrorReason/ExecutionLogs,已验证
+A088,完成状态常量,internal/harness/types.go:32,StatusCompleted,completed状态,已验证
+A089,引用原因码,internal/harness/types.go:15,ErrorReasonUnverifiedCitation,值为unverified_citation,已验证
+A090,读文件集合接口,internal/harness/types.go:19,ReadSet,记录已读文件,已验证
+A091,工具日志结构,internal/harness/types.go:44,ToolLog,ToolName/ArgsHash/Timestamp/Success,已验证
+A092,Harness接口,internal/harness/types.go:74,Harness,Execute(ctx, agent, input),已验证
+A093,参数哈希,internal/harness/oscillation.go:27,ArgsHash,参数JSON的SHA-256,已验证
+A094,震荡检测,internal/harness/oscillation.go:50,DetectOscillation,重复3次或A-B-A-B两轮，纯函数,已验证
+A095,震荡错误,internal/harness/oscillation.go:13,ErrOscillation,震荡中断错误,已验证
+A096,已读路径集合,internal/harness/readset.go:10,pathReadSet,带RWMutex,已验证
+A097,路径归一化,internal/harness/readset.go:44,normalizeReadPath,去./、去:行号、统一分隔符,已验证
+A098,Agent基类,internal/ai/agents/agent.go:142,reviewAgent,四个Agent共享的ReAct实现,已验证
+A099,Agent执行,internal/ai/agents/agent.go:201,reviewAgent.Review,构造executor并解析Final Answer,已验证
+A100,最大迭代,internal/ai/agents/agent.go:34,maxAgentIterations,值为8,已验证
+A101,最大输出token,internal/ai/agents/agent.go:41,maxCompletionTokens,值为16384,已验证
+A102,Prompt组装,internal/ai/agents/agent.go:286,reviewAgent.prepareQuestion,生成SYSTEM与TASK_STATE两块并交给preparer,已验证
+A103,任务状态渲染,internal/ai/agents/agent.go:305,renderTaskState,diff与PRIOR段放在Pinned块,已验证
+A104,JSON解析,internal/ai/agents/agent.go:443,parseFindings,取第一个[到解码,容忍代码围栏,已验证
+A105,PRIOR判定约束,internal/ai/agents/agent.go:266,enforcePriorVerdict,fixed无evidence则降级为unverifiable,已验证
+A106,diff渲染,internal/ai/agents/agent.go:412,renderDiff,输出带新文件行号的unified-like文本,已验证
+A107,ReviewInput,internal/ai/agents/agent.go:105,ReviewInput,Agent输入结构,已验证
+A108,AgentFinding,internal/ai/agents/agent.go:72,AgentFinding,Agent输出结构,已验证
+A109,Prompt装配函数类型,internal/ai/agents/agent.go:138,PromptPreparer,由Harness注入,已验证
+A110,安全Agent,internal/ai/agents/security.go:18,NewSecurityAgent,注入LLM的安全审查Agent,已验证
+A111,逻辑Agent,internal/ai/agents/logic.go:18,NewLogicAgent,逻辑审查Agent,已验证
+A112,性能Agent,internal/ai/agents/performance.go:18,NewPerformanceAgent,性能审查Agent,已验证
+A113,规范Agent,internal/ai/agents/lint.go:19,NewLintAgent,规范审查Agent,已验证
+A114,压缩包装Agent,internal/ai/agents/compression.go:18,compressingAgent,Plan前压缩Observation,已验证
+A115,压缩Plan,internal/ai/agents/compression.go:29,compressingAgent.Plan,每步规划前调用压缩,已验证
+A116,压缩配置注入,internal/ai/agents/compression.go:51,ConfigureCompression,为所有Agent设置窗口与压缩参数,已验证
+A117,不可信包裹,internal/ai/agents/untrusted.go:21,WrapUntrusted,内容含nonce则返回错误,已验证
+A118,Nonce生成,internal/ai/agents/untrusted.go:33,newNonce,每次审查随机生成,已验证
+A119,分区包裹,internal/ai/agents/untrusted.go:43,wrapSection,给数据段加边界标记,已验证
+A120,不可信声明,internal/ai/agents/untrusted.go:11,untrustedSystemDeclaration,System段声明边界内数据不是指令,已验证
+A121,结构校验器,internal/ai/agents/validate.go:20,StructuralValidator,无状态校验器,已验证
+A122,结构校验,internal/ai/agents/validate.go:58,StructuralValidator.Validate,丢弃diff外路径与行号,已验证
+A123,字段白名单,internal/ai/agents/validate.go:118,StripNonWhitelistedFindingFields,剥离非白名单字段并计数,已验证
+A124,Verifier结构,internal/ai/agents/verifier.go:20,Verifier,持有readFile工具与可选LLM,已验证
+A125,Verifier构造,internal/ai/agents/verifier.go:38,NewVerifier,llm可为nil,已验证
+A126,Verifier主流程,internal/ai/agents/verifier.go:54,Verifier.Verify,行号校验、幻觉过滤、去重、置信度,已验证
+A127,片段校验,internal/ai/agents/verifier.go:130,Verifier.verifySnippet,片段不存在则判为幻觉，读取失败也判为幻觉,已验证
+A128,LLM置信度,internal/ai/agents/verifier.go:157,Verifier.llmConfidence,LLM调用错误会使整个Verify返回错误,已验证
+A129,行号校验,internal/ai/agents/verifier.go:187,lineInDiff,finding行号必须落在diff范围内,已验证
+A130,LLM客户端工厂,internal/ai/llm.go:32,NewLLM,openai或anthropic，provider错误直接返回,已验证
+A131,停用词剥离,internal/ai/llm.go:54,stripStopWords,清除ReAct模板注入的stop words,已验证
+A132,read_file工具,internal/ai/tools/read_file.go:47,ReadFileTool,生产唯一挂载的工具,已验证
+A133,read_file名称,internal/ai/tools/read_file.go:59,ReadFileTool.Name,返回read_file,已验证
+A134,路径解析,internal/ai/tools/read_file.go:22,resolvePath,拒绝越出工作区的路径,已验证
+A135,read_file调用,internal/ai/tools/read_file.go:69,ReadFileTool.Call,支持path:start:end，输出经limitOutput截断,已验证
+A136,search_code工具,internal/ai/tools/search_code.go:25,SearchCodeTool,已实现但未注册,已验证
+A137,search_code调用,internal/ai/tools/search_code.go:47,SearchCodeTool.Call,正则搜索，最多20条,已验证
+A138,工作区遍历,internal/ai/tools/search_code.go:138,walkWorkspace,跳过vendor与隐藏目录,已验证
+A139,get_function工具,internal/ai/tools/get_function.go:21,GetFunctionDefTool,已实现但未注册,已验证
+A140,get_function调用,internal/ai/tools/get_function.go:40,GetFunctionDefTool.Call,按函数名抽取定义,已验证
+A141,输出截断,internal/ai/tools/truncate.go:23,limitOutput,超过硬限制截断并附警告,已验证
+A142,Prompt读取,internal/ai/prompts/prompts.go:17,prompts.Get,读取嵌入的系统提示词,已验证
+A143,Prompt哈希,internal/ai/prompts/prompts.go:27,prompts.Hash,提示词SHA-256，作为checkpoint键的一部分,已验证
+A144,Prompt嵌入,internal/ai/prompts/prompts.go:13,go:embed *.txt,提示词编译进二进制,已验证
+A145,上下文块,internal/context/assembler.go:29,ContextBlock,Source/Content/Tokens/IsPinned/Sequence,已验证
+A146,装配器接口,internal/context/assembler.go:45,ContextAssembler,Assemble与ShouldCompress,已验证
+A147,装配器,internal/context/assembler.go:55,Assembler,按来源优先级排序,已验证
+A148,装配,internal/context/assembler.go:86,Assembler.Assemble,SYSTEM→TASK_STATE→TOOL_OUTPUT→MEMORY,已验证
+A149,装配侧压缩判断,internal/context/assembler.go:79,Assembler.ShouldCompress,委托给monitor,已验证
+A150,来源优先级,internal/context/assembler.go:123,SourcePriority,Pinned与可压缩来源的排序依据,已验证
+A151,压缩器,internal/context/compressor.go:25,Compressor,滑动窗口压缩,已验证
+A152,压缩,internal/context/compressor.go:39,Compressor.Compress,保留最近N轮，更早的替换为摘要,已验证
+A153,压缩配置,internal/context/monitor.go:19,CompressionConfig,trigger_ratio/absolute_token_limit/keep_recent_rounds,已验证
+A154,Token估算,internal/context/monitor.go:46,EstimateTokens,字符数除以4，不是真正tokenizer,已验证
+A155,压缩触发,internal/context/monitor.go:74,ShouldCompress,比例与绝对值双轨,已验证
+A156,上下文构建器,internal/context/builder_impl.go:19,Builder,按变更构建ContextBundle,已验证
+A157,构建,internal/context/builder_impl.go:45,Builder.Build,无结构性变更时不加载包,已验证
+A158,结构性变更检测,internal/context/detector.go:22,DetectStructuralChanges,go/ast比较导出签名与接口方法集,已验证
+A159,调用点检索,internal/context/callers.go:31,CallerRetriever,单层调用点，上限10,已验证
+A160,调用点查找,internal/context/callers.go:72,CallerRetriever.Callers,跳过有编译错误的包,已验证
+A161,被调用者抽取,internal/context/callees.go:16,ExtractCallees,抽取签名与首行注释,已验证
+A162,上下文包,internal/context/types.go:57,ContextBundle,Changes/Callers/Callees,已验证
+A163,预分析发现结构,internal/analysis/types.go:26,PreAnalysisFinding,ID/Tool/RuleID/FilePath/Line/Severity等（结构已冻结）,已验证
+A164,预分析指纹,internal/analysis/fingerprint.go:13,Fingerprint,格式为tool:rule:file:line，含行号,已验证
+A165,预分析管道,internal/analysis/pipeline.go:127,Pipeline.Run,并发运行分析器，按指纹去重,已验证
+A166,单任务执行,internal/analysis/pipeline.go:228,Pipeline.runJob,每个工具每个文件独立超时，超时后放弃goroutine,已验证
+A167,超大文件跳过,internal/analysis/pipeline.go:163,maxFileLines,超过5000行跳过,已验证
+A168,分析并发组,internal/analysis/pipeline.go:175,errgroup.Group,生产者加多个worker,已验证
+A169,分析子goroutine,internal/analysis/pipeline.go:237,go func(),每个job一个goroutine,已验证
+A170,golangci分析器,internal/analysis/golangci.go:59,GolangciLintAnalyzer,调用golangci-lint v2 CLI,已验证
+A171,golangci进程锁,internal/analysis/golangci.go:23,golangciRunMu,进程内串行化,已验证
+A172,golangci重试,internal/analysis/golangci.go:113-129,retry loop,最多8次，每次等待10秒,已验证
+A173,golangci分析,internal/analysis/golangci.go:86,GolangciLintAnalyzer.Analyze,按包运行并过滤到目标文件,已验证
+A174,semgrep执行,internal/analysis/semgrep.go:95,exec.CommandContext,外部CLI调用,已验证
+A175,评审复杂度,internal/review/assessor.go:116,Assessor.Assess,纯统计，不调用LLM,已验证
+A176,评估器构造,internal/review/assessor.go:92,NewAssessor,注入阈值与敏感路径,已验证
+A177,默认Trivial阈值,internal/review/assessor.go:31,DefaultTrivialMaxLines,默认20行,已验证
+A178,策略选择,internal/review/strategy.go:40,Selector.Select,Trivial只启用security与lint,已验证
+A179,Agent启用判断,internal/review/strategy.go:56,IsAgentEnabled,被Orchestrator用于过滤,已验证
+A180,发布计划,internal/review/publish_plan.go:57,PlanPublish,纯函数，按指纹与出现序号分桶,已验证
+A181,线程状态,internal/review/publish_plan.go:23,ThreadState,GitHub线程的本地表示,已验证
+A182,发现指纹,internal/review/finding_fingerprint.go:18,FindingFingerprint,不含行号的LLM finding身份,已验证
+A183,GitHub客户端,internal/github/client.go:18,Client,封装go-github,已验证
+A184,GitHub客户端构造,internal/github/client.go:23,NewClient,仅设置AuthToken，无重试与限流处理,已验证
+A185,获取PR diff,internal/github/client.go:40,Client.GetPRDiff,调用PullRequests.GetRaw,已验证
+A186,获取比较diff,internal/github/client.go:74,Client.GetCompareDiff,404与422/413映射为sentinel错误,已验证
+A187,获取文件内容,internal/github/client.go:99,Client.GetFileAtRef,供隐式反馈使用,已验证
+A188,GraphQL线程查询,internal/github/threads.go:16,reviewThreadsQuery,reviewThreads(first:100)与comments(first:100)，无分页,已验证
+A189,线程读取,internal/github/threads.go:74,Client.ListReviewThreads,单次请求，超过100条被截断,已验证
+A190,线程关闭,internal/github/threads.go:129,Client.ResolveReviewThread,GraphQL resolveReviewThread,已验证
+A191,提交发布计划,internal/github/review.go:179,Client.SubmitReviewPlan,按计划提交Review,已验证
+A192,提交Findings,internal/github/review.go:110,Client.SubmitFindingsReview,未带warnings版本,已验证
+A193,LGTM回写,internal/github/review.go:173,Client.SubmitLGTMReview,无发现时使用,已验证
+A194,提交commit status,internal/github/status.go:27,Client.UpdateCommitStatus,写状态到head_sha,已验证
+A195,工作区克隆,internal/vcs/workspace.go:25,PrepareWorkspace,临时目录全量clone后checkout,已验证
+A196,Token注入,internal/vcs/workspace.go:38,http.BasicAuth,用户名x-access-token，不拼进URL,已验证
+A197,全量克隆,internal/vcs/workspace.go:40,git.PlainCloneContext,无depth参数,已验证
+A198,按SHA回退获取,internal/vcs/workspace.go:92,fetchBySHA,PR ref失败后按SHA获取,已验证
+A199,checkout,internal/vcs/workspace.go:111,checkoutHash,切换到目标commit,已验证
+A200,反馈追踪器,internal/feedback/tracker.go:32,Tracker,隐式反馈状态机,已验证
+A201,同步追踪,internal/feedback/tracker.go:57,Tracker.TrackOnSynchronize,比较旧新文件±5行相似度,已验证
+A202,关闭追踪,internal/feedback/tracker.go:124,Tracker.TrackOnClosed,pending置为ignored_implicit,已验证
+A203,相似度,internal/feedback/diff_compare.go:15,Similarity,基于Levenshtein的文本相似度,已验证
+A204,状态解决,internal/feedback/tracker.go:137,Tracker.resolve,幂等更新,已验证
+A205,Checkpoint结构,internal/repository/checkpoint_repo.go:14,Checkpoint,含prompt_hash与config_hash,已验证
+A206,Checkpoint写入,internal/repository/checkpoint_repo.go:65,CheckpointRepo.Save,ON CONFLICT upsert,已验证
+A207,Checkpoint冲突键,internal/repository/checkpoint_repo.go:73,ON CONFLICT (head_sha, agent_name, prompt_hash, config_hash),四元组幂等,已验证
+A208,Checkpoint查询,internal/repository/checkpoint_repo.go:111,CheckpointRepo.GetBySHAAndAgentWithHashes,四元组查询,已验证
+A209,创建审查,internal/repository/review_repo.go:78,ReviewRepo.CreateReview,插入reviews记录,已验证
+A210,锚点更新,internal/repository/review_repo.go:101,ReviewRepo.UpdateReviewAnchor,写reviewed_sha与scope,已验证
+A211,最近完成审查,internal/repository/review_repo.go:115,ReviewRepo.LatestCompletedReview,status=completed按created_at倒序取一条,已验证
+A212,Agent结果更新,internal/repository/review_repo.go:175,ReviewRepo.UpdateReviewAgentResults,整体覆盖JSONB列,已验证
+A213,审查状态更新,internal/repository/review_repo.go:191,ReviewRepo.UpdateReviewStatus,更新status与summary,已验证
+A214,Finding列表,internal/repository/review_repo.go:283,ReviewRepo.ListFindings,按严重度排序,已验证
+A215,指纹回填,internal/repository/finding_repo.go:24,FindingRepo.BackfillFingerprints,启动时补写空指纹,已验证
+A216,PR commit记录,internal/repository/feedback_repo.go:105,FeedbackRepo.RecordPRCommit,ON CONFLICT DO NOTHING,已验证
+A217,反馈状态更新,internal/repository/feedback_repo.go:92,FeedbackRepo.UpdateFindingFeedbackStatus,WHERE条件保证终态不被覆盖,已验证
+A218,DB连接,internal/db/db.go:22,Connect,pgxpool.ParseConfig后连接,已验证
+A219,嵌入迁移,internal/db/db.go:17,go:embed migrations/*.sql,迁移编译进二进制,已验证
+A220,迁移执行,internal/db/db.go:44,Migrate,逐文件Exec后单独INSERT记录，无advisory lock，无事务,已验证
+A221,迁移入口,internal/db/db.go:132,MigrateFromURL,连接、迁移、返回pool,已验证
+A222,迁移记录表,internal/db/db.go:54,schema_migrations,版本名作为主键,已验证
+A223,reviews表,internal/db/migrations/001_create_tables.sql:5,CREATE TABLE reviews,审查记录,已验证
+A224,findings表,internal/db/migrations/001_create_tables.sql:19,CREATE TABLE findings,review_id外键级联删除,已验证
+A225,pr_commits表,internal/db/migrations/004_add_feedback.sql:6,CREATE TABLE pr_commits,唯一键repo+pr+sha,已验证
+A226,checkpoints表,internal/db/migrations/006_add_checkpoints.sql:4,CREATE TABLE harness_checkpoints,初始唯一键head_sha+agent_name,已验证
+A227,锚点索引,internal/db/migrations/007_add_review_anchor.sql:8,idx_reviews_repo_pr_status,按repo+pr+status查最近完成审查,已验证
+A228,checkpoints四元唯一键,internal/db/migrations/007_add_review_anchor.sql:28,UNIQUE (head_sha agent_name prompt_hash config_hash),已验证
+A229,指纹索引,internal/db/migrations/008_add_finding_fingerprint.sql:4,idx_findings_fingerprint,已验证
+A230,配置结构,internal/config/config.go:13,Config,全部运行配置,已验证
+A231,Verifier配置,internal/config/config.go:47,VerifierConfig,enabled开关,已验证
+A232,Verifier配置校验,internal/config/config.go:171,Config.ValidateVerifier,enabled为true且LLM为nil时报错，enabled为false时不报错,已验证
+A233,配置加载,internal/config/config.go:181,Load,viper加载与环境变量绑定,已验证
+A234,verifier默认值,internal/config/config.go:209,SetDefault verifier.enabled,默认true,已验证
+A235,trivial_verifier默认值,internal/config/config.go:210,SetDefault trivial_verifier,默认false,已验证
+A236,离线评估指标,internal/eval/evaluator.go:145,ComputeMetrics,Precision与Recall,已验证
+A237,评估报告,internal/eval/evaluator.go:162,BuildReport,含baseline对比,已验证
+A238,评估入口,cmd/eval/main.go:34,main,Makefile:33 eval调用,已验证
+A239,评估Verifier工厂,cmd/eval/main.go:110-112,verifierFactory,与server相同的enabled条件,已验证
+A240,仪表盘注册,internal/handler/dashboard.go:104,Dashboard.Register,挂载页面与API，无鉴权中间件,已验证
+A241,仪表盘反馈指标,internal/handler/dashboard.go:114,handleAPIMetricsFeedback,唯一的指标端点,已验证
+A242,仪表盘构造,internal/handler/dashboard.go:76,NewDashboard,读取templates目录,已验证
+A243,SSE事件总线,internal/handler/sse.go:25,NewEventBroker,进程内发布订阅,已验证
+A244,SSE发布,internal/handler/sse.go:48,EventBroker.Publish,按topic广播,已验证
+A245,SSE处理,internal/handler/sse.go:123,StreamReviewHandler.ServeHTTP,pr_id来自查询参数，无鉴权,已验证
+A246,SSE演示分支,internal/handler/sse.go:147,demo=1分支,按查询参数播放脚本事件,已验证
+A247,SSE挂载,internal/handler/sse.go:198,MountStreamReview,注册/api/stream-review,已验证
+A248,静态资源挂载,internal/handler/static.go:12,MountStatic,FileServer挂载在/*,已验证
+A249,Dockerfile运行镜像,Dockerfile:14,FROM alpine:3.20,运行镜像未安装semgrep与golangci-lint,已验证
+A250,Dockerfile非root,Dockerfile:16-17,adduser app与USER app,已验证
+A251,Compose数据库,docker-compose.yml:2,services.postgres,postgres:16-alpine,已验证
+A252,Compose应用,docker-compose.yml:18,services.app,依赖postgres健康检查,已验证
+A253,Compose转发,docker-compose.yml:35,services.smee,开发用webhook转发,已验证
+A254,测试命令,Makefile:18,make test,go test ./... -race,已验证
+A255,DB测试开关,internal/repository/review_repo_test.go:26,SKIP_DB_TESTS,未设置时需要可用测试库,已验证
+A256,端到端跳过,internal/integration/e2e_test.go:147,testing.Short,短模式跳过真实CLI测试,已验证
+A257,语义分析测试开关,internal/analysis/semgrep_test.go:114,SKIP_SEMGREP_TESTS,已验证
+A258,注入样例,eval/dataset/injection-comment,dataset目录,注释注入样例，另有commit-message与json-literal样例,已验证
+A259,Git忽略,.gitignore:2,.env,环境文件被忽略（未读取内容）,已验证
+A260,Git忽略,.gitignore:27,configs/config.yaml,实际配置被忽略（未读取内容）,已验证
+A261,未实现：持久化任务队列,TODO,TODO（spec 27.2 review_jobs，迁移仅到008）,全仓无 review_jobs,待确认
+A262,未实现：agent_trace,TODO,TODO（spec 27.2 agent_trace），无迁移与写入代码,全仓无对应表,待确认
+A263,未实现：向量库与Embedding,TODO,TODO（无向量库、无embedding服务、无rerank）,全仓grep无命中,待确认
+A264,未实现：Redis或Mongo,TODO,TODO（无缓存服务或文档库依赖）,go.mod无相关依赖,待确认
+A265,未实现：per-PR互斥,TODO,TODO（Pipeline无锁，同PR并发push无串行化）,pipeline.go:79结构无锁字段,代码推断
+A266,未实现：advisory lock,TODO,TODO（迁移与任务领取无数据库锁）,全仓无pg_advisory,代码推断
+A267,未实现：git历史工具,TODO,TODO（spec 25.2 git_blame/git_log_file，代码不存在）,全仓无对应文件,待确认
+A268,未实现：tokenizer,TODO,TODO（spec 26.3 Tokenizer接口，代码不存在）,全仓无Tokenizer,待确认
+A269,未实现：规则文件读取,TODO,TODO（spec 26.2 .codereviewagent/rules.md，代码不存在）,全仓无该路径,待确认
+A270,未实现：PR预算,TODO,TODO（spec 26.2 budget配置，代码不存在）,config.go无budget字段,待确认
+A271,未实现：对账任务,TODO,TODO（spec 28.2 reconciler，代码不存在）,全仓无reconcile包,待确认
+A272,未实现：CI配置,TODO,TODO（仓库无.github目录）,glob无结果,已验证

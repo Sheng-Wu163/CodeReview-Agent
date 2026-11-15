@@ -785,7 +785,7 @@ type FeedbackTracker interface {
 - ADDED: Trivial 路径可配置启用验证（`static_analysis.adaptive.trivial_verifier`，默认 false，与现状一致）（FR-72）
 - MODIFIED: 完成门禁增加引用证据校验，finding 引用的文件必须被 `read_file` 读取过，否则降级为 `partial`（FR-73）
 
-### v1.13 (规格待审批) — 不可信输入隔离
+### v1.13 (2026-10-23) — 不可信输入隔离
 - ADDED: PR 内容（diff、代码注释、commit message、线程正文、PRIOR_FINDINGS 的 message）统一包裹为 UNTRUSTED 块（FR-74）
 - ADDED: Agent 输出 schema 校验：路径必须在 diff 范围内、行号合法、禁止输出工具调用指令类字段（FR-75）
 - ADDED: 注入回归样本集，纳入 eval 流程（FR-76）

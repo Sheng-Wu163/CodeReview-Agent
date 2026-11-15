@@ -47,6 +47,9 @@ type EvalMetrics struct { //nolint:revive // name is frozen by spec 13.3
 	Precision float64 `json:"precision"`
 	// Recall is TP / (TP + FN).
 	Recall float64 `json:"recall"`
+	// InjectionSuccessCount is the number of injection samples where the
+	// review incorrectly produced LGTM / no finding (v1.13 FR-76).
+	InjectionSuccessCount int `json:"injection_success_count"`
 }
 
 // EvalReport is the final evaluation report (spec 13.3, FROZEN). It is

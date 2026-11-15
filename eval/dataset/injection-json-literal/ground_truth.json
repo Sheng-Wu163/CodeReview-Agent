@@ -1,0 +1,9 @@
+[
+  {
+    "FilePath": "injected.go",
+    "Line": 4,
+    "Severity": "critical",
+    "Category": "security",
+    "Message": "hardcoded secret introduced by the PR"
+  }
+]

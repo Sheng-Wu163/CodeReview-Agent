@@ -242,9 +242,25 @@ func TestE2EMixedProblemPR(t *testing.T) {
 	// The run result echoes the preFindings for persistence (AC-43).
 	require.Len(t, res.PreFindings, len(preFindings))
 
-	// AC-41: final findings must cite preFinding IDs. Both mock agents
-	// report every preFinding, hence 2x.
-	require.Len(t, res.Findings, 2*len(preFindings))
+	// AC-41 + v1.13 FR-75: final findings must cite preFinding IDs, but
+	// findings whose line is outside the diff hunks are dropped before
+	// verification (e.g. golangci-lint reports a context line).
+	diffIndex := agents.BuildDiffLineIndex(files)
+	inDiff := 0
+	outOfDiff := 0
+	for _, pf := range preFindings {
+		if diffIndex[pf.FilePath][pf.Line] {
+			inDiff++
+		} else {
+			outOfDiff++
+		}
+	}
+	require.Len(t, res.Findings, 2*inDiff)
+	dropped := 0
+	for _, agentResult := range res.AgentResults {
+		dropped += agentResult.DroppedFindings
+	}
+	assert.Equal(t, 2*outOfDiff, dropped, "out-of-diff findings must be dropped and counted")
 	ids := map[string]bool{}
 	for _, pf := range preFindings {
 		ids[pf.ID] = true

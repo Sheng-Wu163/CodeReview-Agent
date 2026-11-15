@@ -153,7 +153,11 @@ func (e *Executor) Execute(ctx context.Context, agent agents.ReviewAgent, input 
 		setter.SetPromptPreparer(e.preparePrompt)
 	}
 	findings, err := agent.Review(runCtx, runInput)
-	result.Findings = findings
+	// v1.13 FR-75: structurally validate agent output before verification.
+	validator := agents.NewStructuralValidator()
+	result.Findings, result.DroppedFindings = validator.Validate(
+		findings, agents.BuildDiffLineIndex(input.Diffs))
+	findings = result.Findings
 	result.ToolCallCount = recorder.count()
 	result.ExecutionLogs = recorder.snapshot()
 
