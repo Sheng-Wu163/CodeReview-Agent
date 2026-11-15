@@ -21,13 +21,18 @@ type StrategySelector interface {
 
 // Selector is the default StrategySelector. It only decides which agents
 // run; it never adjusts agent parameters (FR-35, CLAUDE.v.1.2.md).
-type Selector struct{}
+type Selector struct {
+	trivialVerifier bool
+}
 
 // Compile-time check that Selector implements StrategySelector.
 var _ StrategySelector = (*Selector)(nil)
 
 // NewSelector creates the default strategy selector.
 func NewSelector() *Selector { return &Selector{} }
+
+// SetTrivialVerifier enables the verifier for Trivial PRs (v1.12 FR-72).
+func (s *Selector) SetTrivialVerifier(enabled bool) { s.trivialVerifier = enabled }
 
 // Select implements StrategySelector:
 //   - Trivial: only the security and lint agents, no verifier.
@@ -37,7 +42,7 @@ func (s *Selector) Select(level ComplexityLevel) ReviewStrategy {
 		return ReviewStrategy{
 			Level:          level,
 			EnabledAgents:  []string{AgentSecurity, AgentLint},
-			EnableVerifier: false,
+			EnableVerifier: s.trivialVerifier,
 		}
 	}
 	return ReviewStrategy{

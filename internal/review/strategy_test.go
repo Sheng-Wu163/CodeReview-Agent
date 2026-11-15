@@ -35,6 +35,20 @@ func TestSelectorStandardAndComplex(t *testing.T) {
 	}
 }
 
+// AC-135/AC-136: the Trivial verifier switch is opt-in.
+func TestSelectorTrivialVerifierSwitch(t *testing.T) {
+	selector := NewSelector()
+	selector.SetTrivialVerifier(true)
+	if !selector.Select(ComplexityTrivial).EnableVerifier {
+		t.Error("trivial_verifier=true must enable the verifier")
+	}
+
+	selector.SetTrivialVerifier(false)
+	if selector.Select(ComplexityTrivial).EnableVerifier {
+		t.Error("trivial_verifier=false must keep the verifier disabled")
+	}
+}
+
 func TestIsAgentEnabled(t *testing.T) {
 	trivial := NewSelector().Select(ComplexityTrivial)
 	if !IsAgentEnabled(trivial, "security") || !IsAgentEnabled(trivial, "lint") {

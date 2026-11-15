@@ -10,6 +10,17 @@ import (
 	"codereviewagent/internal/ai/agents"
 )
 
+// ErrorReasonUnverifiedCitation marks a completed result whose findings cite
+// files the agent never read successfully (v1.12 FR-73).
+const ErrorReasonUnverifiedCitation = "unverified_citation"
+
+// ReadSet records the normalized paths successfully read in one execution.
+// It is internal to the Harness and never exposed to agents.
+type ReadSet interface {
+	Add(path string)
+	Has(path string) bool
+}
+
 // AgentStatus is the Harness-owned outcome of one agent execution. Agents
 // never set it themselves (CLAUDE.v.1.8.md): only the Harness decides the
 // final status through the unified completion gate.

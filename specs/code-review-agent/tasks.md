@@ -900,7 +900,7 @@ T10 + T11 + T12 → T13 → T14
 - **完成标准**：全仓库只有一条 Prompt 装配路径（AC-133）。
 - **依赖**：无
 - **预估**：2h
-- **状态**：⬜ 未开始
+- **状态**：✅ 已完成
 
 ### T75: 生产 Verifier 启用 LLM（FR-72）
 - **描述**：`cmd/server/main.go` 与 `cmd/eval/main.go` 传入真实 LLM 客户端（复用 `llm.go` 的模型）。配置要求启用验证但 LLM 为 nil 时，启动直接返回错误。
@@ -911,7 +911,7 @@ T10 + T11 + T12 → T13 → T14
 - **完成标准**：生产构造的 Verifier 非 nil；Standard/Complex 的 finding 经过对抗验证（AC-134）。
 - **依赖**：T74
 - **预估**：2h
-- **状态**：⬜ 未开始
+- **状态**：✅ 已完成
 
 ### T76: Trivial 路径验证开关（FR-72）
 - **描述**：新增配置 `static_analysis.adaptive.trivial_verifier`（默认 false）。开启时 Trivial 策略启用 Verifier，关闭时保持现状。
@@ -923,7 +923,7 @@ T10 + T11 + T12 → T13 → T14
 - **完成标准**：开关开启时 Trivial 发现经过 Verifier（AC-135）；关闭时不调用 Verifier（AC-136）。
 - **依赖**：T75
 - **预估**：2h
-- **状态**：⬜ 未开始
+- **状态**：✅ 已完成
 
 ### T77: 完成门禁引用证据校验（FR-73）
 - **描述**：Harness 记录每次 `read_file` 成功读取的路径集合。`completed` 结果中的 finding 若引用了未读取过的文件，降级为 `partial`，`ErrorReason = unverified_citation`，并保留 findings 与标记。
@@ -934,7 +934,7 @@ T10 + T11 + T12 → T13 → T14
 - **完成标准**：未读取文件被引用时降级（AC-137）；全部引用已读取时状态不变（AC-138）。
 - **依赖**：T74
 - **预估**：3h
-- **状态**：⬜ 未开始
+- **状态**：✅ 已完成
 
 ### T78: v1.12 集成测试与交付
 - **描述**：端到端测试 Standard PR，验证 Verifier 实际调用；更新 CHANGELOG 与 checklist，提示用户打 tag。
@@ -943,7 +943,7 @@ T10 + T11 + T12 → T13 → T14
 - **完成标准**：AC-133 ~ AC-138 全部通过。
 - **依赖**：T75, T76, T77
 - **预估**：2h
-- **状态**：⬜ 未开始
+- **状态**：✅ 已完成
 
 ## 阶段十七：v1.13 不可信输入隔离（T79-T82）
 

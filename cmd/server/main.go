@@ -92,26 +92,34 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init LLM: %w", err)
 	}
+	if err := cfg.ValidateVerifier(llm != nil); err != nil {
+		return err
+	}
 	reviewAgents := []agents.ReviewAgent{
 		agents.NewSecurityAgent(llm),
 		agents.NewLogicAgent(llm),
 		agents.NewPerformanceAgent(llm),
 		agents.NewLintAgent(llm),
 	}
-	orch := orchestrator.New(logger, "", reviewAgents,
-		func(root string) orchestrator.Verifier {
-			return agents.NewVerifier(tools.ReadFileTool{Root: root}, nil)
-		}, nil)
+	var verifierFactory orchestrator.VerifierFactory
+	if cfg.Verifier.Enabled {
+		verifierFactory = func(root string) orchestrator.Verifier {
+			return agents.NewVerifier(tools.ReadFileTool{Root: root}, llm)
+		}
+	}
+	orch := orchestrator.New(logger, "", reviewAgents, verifierFactory, nil)
 	orch.SetAnalysisConfig(cfg.StaticAnalysis)
 	orch.SetCompressionConfig(cfg.Compression)
 	orch.SetCheckpointStore(repository.NewCheckpointRepo(pool))
 	orch.SetCheckpointConfig(cfg.ForceRerun, cfg.ForceRerunAgents)
+	selector := review.NewSelector()
+	selector.SetTrivialVerifier(cfg.StaticAnalysis.Adaptive.TrivialVerifier)
 	orch.SetReviewStrategy(review.NewAssessor(review.AssessorOptions{
 		TrivialMaxLines: cfg.StaticAnalysis.Adaptive.TrivialMaxLines,
 		ComplexMinLines: cfg.StaticAnalysis.Adaptive.ComplexMinLines,
 		ComplexMinFiles: cfg.StaticAnalysis.Adaptive.ComplexMinFiles,
 		SensitivePaths:  cfg.StaticAnalysis.Adaptive.SensitivePaths,
-	}), review.NewSelector())
+	}), selector)
 	ghClient := github.NewClient(cfg.GitHubToken)
 	pipeline := orchestrator.NewPipeline(orch, ghClient, store, cfg.GitHubToken, logger)
 	reviewProc = eventProcessorAdapter{pipeline: pipeline}

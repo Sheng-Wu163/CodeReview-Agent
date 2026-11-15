@@ -473,20 +473,27 @@
 
 ## v1.12 Harness 收口与验证门禁验收
 
-- [ ] AC-133: Given 任一 Agent 执行, When 组装 Prompt, Then 仅经由 `preparePrompt` 单一路径。
-- [ ] AC-134: Given 生产环境启动, When 构造 Verifier, Then LLM 非 nil，Standard/Complex 的 finding 经过对抗验证。
-- [ ] AC-135: Given `trivial_verifier=true` 的 Trivial PR, When 审查, Then 发现经过 Verifier。
-- [ ] AC-136: Given `trivial_verifier=false` 的 Trivial PR, When 审查, Then 不调用 Verifier。
-- [ ] AC-137: Given Agent 声称 finding 位于 `auth.go` 但未读取该文件, When 完成门禁, Then 状态降级为 `partial`，`ErrorReason = unverified_citation`。
-- [ ] AC-138: Given 所有引用文件均已被 `read_file` 读取, When 完成门禁, Then 状态保持 `completed`。
+- [x] AC-133: Given 任一 Agent 执行, When 组装 Prompt, Then 仅经由 `preparePrompt` 单一路径。
+  - ✅ Harness 注入 `SetPromptPreparer`；`reviewAgent` 只构造 ContextBlock，统一走 `ContextAssembler.Assemble`
+- [x] AC-134: Given 生产环境启动, When 构造 Verifier, Then LLM 非 nil，Standard/Complex 的 finding 经过对抗验证。
+  - ✅ `cmd/server` / `cmd/eval` 注入 `llm`；`ValidateVerifier` 防止 enabled+nil；`TestValidateVerifierRequiresLLM` + 既有 Standard verifier 测试
+- [x] AC-135: Given `trivial_verifier=true` 的 Trivial PR, When 审查, Then 发现经过 Verifier。
+  - ✅ `TestSelectorTrivialVerifierSwitch`
+- [x] AC-136: Given `trivial_verifier=false` 的 Trivial PR, When 审查, Then 不调用 Verifier。
+  - ✅ `TestSelectorTrivialVerifierSwitch` + 既有 `TestOrchestratorTrivialStrategySkipsAgents`
+- [x] AC-137: Given Agent 声称 finding 位于 `auth.go` 但未读取该文件, When 完成门禁, Then 状态降级为 `partial`，`ErrorReason = unverified_citation`。
+  - ✅ `TestExecuteCitationGate`（citation not read）
+- [x] AC-138: Given 所有引用文件均已被 `read_file` 读取, When 完成门禁, Then 状态保持 `completed`。
+  - ✅ `TestExecuteCitationGate`（read/cited、`./` 归一化、空路径跳过）
 
 ## v1.12 迭代交付清单
 
-- [ ] AC-133 ~ AC-138 全部通过
-- [ ] `go build ./...` 通过
-- [ ] `go test ./...` 通过
-- [ ] `spec.md` 的 CHANGELOG 已追加 v1.12
-- [ ] `tasks.md` 中 T74 ~ T78 已标记完成
+- [x] AC-133 ~ AC-138 全部通过
+- [x] `go build ./...` 通过
+- [x] `go test ./...` 通过（本机无 gcc，`-race` 需在具备 cgo 的环境补充执行）
+- [x] `verifier.enabled` 与 `static_analysis.adaptive.trivial_verifier` 已加入配置示例
+- [x] `spec.md` 的 CHANGELOG 已追加 v1.12
+- [x] `tasks.md` 中 T74 ~ T78 已标记完成
 - [ ] git tag `v1.12-complete` 已打 ← 由用户人工执行
 
 ## v1.13 不可信输入隔离验收

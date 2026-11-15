@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/tmc/langchaingo/agents"
 	"github.com/tmc/langchaingo/chains"
@@ -93,6 +94,9 @@ type AgentFinding struct {
 	Verdict PriorFindingVerdict `json:"verdict,omitempty"`
 	// Evidence is the current code the agent read to justify "fixed".
 	Evidence string `json:"evidence,omitempty"`
+	// UnverifiedCitation marks a finding whose file was never successfully
+	// read by the agent (v1.12 FR-73).
+	UnverifiedCitation bool `json:"unverified_citation,omitempty"`
 }
 
 // ReviewInput bundles everything a review agent needs for one run
@@ -128,6 +132,11 @@ type ReviewAgent interface {
 	Review(ctx context.Context, input ReviewInput) ([]AgentFinding, error)
 }
 
+// PromptPreparer assembles context blocks into the final prompt. The Harness
+// injects its single preparePrompt implementation so every LLM-bound prompt
+// uses the same assembly and compression path (v1.12 FR-71).
+type PromptPreparer func(ctx context.Context, blocks []ctxcontext.ContextBlock) (string, error)
+
 // reviewAgent is the shared ReAct-based implementation used by all review
 // agents. Each concrete agent only picks a name and a system prompt.
 type reviewAgent struct {
@@ -138,6 +147,27 @@ type reviewAgent struct {
 	// compression (FR-53/FR-54). Zero values use the spec defaults.
 	modelWindow int
 	compression ctxcontext.CompressionConfig
+	// preparer is injected by the Harness; atomic to keep concurrent
+	// executions of a shared agent race-free.
+	preparer atomic.Value // stores PromptPreparer
+}
+
+// SetPromptPreparer installs the Harness-owned prompt assembly function
+// (v1.12 FR-71).
+func (a *reviewAgent) SetPromptPreparer(preparer PromptPreparer) {
+	if preparer != nil {
+		a.preparer.Store(preparer)
+	}
+}
+
+// promptPreparer returns the injected preparer, if any.
+func (a *reviewAgent) promptPreparer() (PromptPreparer, bool) {
+	value := a.preparer.Load()
+	if value == nil {
+		return nil, false
+	}
+	preparer, ok := value.(PromptPreparer)
+	return preparer, ok
 }
 
 // SetCompression configures v1.9 in-loop memory compression for this agent.
@@ -187,7 +217,10 @@ func (a *reviewAgent) Review(ctx context.Context, input ReviewInput) ([]AgentFin
 	}
 	executor := agents.NewExecutor(planner, agents.WithMaxIterations(maxAgentIterations))
 
-	question := buildReviewQuestion(systemPrompt, input)
+	question, err := a.prepareQuestion(ctx, systemPrompt, input)
+	if err != nil {
+		return nil, fmt.Errorf("%s agent: prepare prompt: %w", a.name, err)
+	}
 	result, err := executor.Call(ctx, map[string]any{"input": question},
 		chains.WithMaxTokens(maxCompletionTokens))
 	if err != nil {
@@ -246,14 +279,27 @@ func enforcePriorVerdict(f *AgentFinding) {
 	}
 }
 
-// buildReviewQuestion assembles the full question fed to the ReAct loop:
-// the externalized system prompt followed by the three mandatory sections
-// (CLAUDE.v1.1.md): "## 代码变更", "## 静态分析发现" and, only when present,
-// "## 补充上下文".
-func buildReviewQuestion(systemPrompt string, input ReviewInput) string {
+// prepareQuestion builds the context blocks and hands them to the
+// Harness-injected preparer. When an agent is used without a Harness (unit
+// tests), it still goes through the same ContextAssembler implementation,
+// so there is exactly one assembly path in production (v1.12 FR-71).
+func (a *reviewAgent) prepareQuestion(ctx context.Context, systemPrompt string, input ReviewInput) (string, error) {
+	blocks := []ctxcontext.ContextBlock{
+		{Source: ctxcontext.SourceSystem, Content: systemPrompt, IsPinned: true, Sequence: 0},
+		{Source: ctxcontext.SourceTaskState, Content: renderTaskState(input), IsPinned: true, Sequence: 1},
+	}
+	if preparer, ok := a.promptPreparer(); ok {
+		return preparer(ctx, blocks)
+	}
+	assembler := ctxcontext.NewAssembler(ctxcontext.CompressionConfig{})
+	return assembler.Assemble(ctx, blocks)
+}
+
+// renderTaskState renders the pinned task section: diff, static-analysis
+// findings, the incremental scope declaration and prior findings.
+func renderTaskState(input ReviewInput) string {
 	var b strings.Builder
-	b.WriteString(systemPrompt)
-	b.WriteString("\n\n## 代码变更\n")
+	b.WriteString("## 代码变更\n")
 	b.WriteString(renderDiff(input.Diffs))
 	b.WriteString("\n")
 	b.WriteString(renderPreFindings(input.PreFindings))
@@ -270,6 +316,17 @@ func buildReviewQuestion(systemPrompt string, input ReviewInput) string {
 		b.WriteString(renderContext(input.Context))
 	}
 	return b.String()
+}
+
+// buildReviewQuestion is the test-facing wrapper around prepareQuestion
+// (the production path always goes through the Harness).
+func buildReviewQuestion(systemPrompt string, input ReviewInput) string {
+	agent := &reviewAgent{}
+	question, err := agent.prepareQuestion(context.Background(), systemPrompt, input)
+	if err != nil {
+		return ""
+	}
+	return question
 }
 
 // renderPriorFindings renders the previous review's unresolved findings and

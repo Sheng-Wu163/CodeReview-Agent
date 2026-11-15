@@ -126,12 +126,6 @@ func (e *Executor) preparePrompt(ctx context.Context, blocks []ctxcontext.Contex
 	return e.assembler.Assemble(ctx, blocks)
 }
 
-// PreparePrompt is the exported form of preparePrompt, used by prompt
-// writers that delegate context assembly to the Harness.
-func (e *Executor) PreparePrompt(ctx context.Context, blocks []ctxcontext.ContextBlock) (string, error) {
-	return e.preparePrompt(ctx, blocks)
-}
-
 // Execute implements Harness (FR-48). It wraps the input tools, runs the
 // agent, then applies the completion gate and returns the structured result.
 func (e *Executor) Execute(ctx context.Context, agent agents.ReviewAgent, input agents.ReviewInput) (AgentResult, error) {
@@ -150,8 +144,14 @@ func (e *Executor) Execute(ctx context.Context, agent agents.ReviewAgent, input 
 
 	recorder := &recorder{}
 	runInput := input
-	runInput.Tools = e.governTools(input.Tools, recorder)
+	readPaths := newPathReadSet()
+	runInput.Tools = e.governTools(input.Tools, recorder, readPaths)
 
+	// v1.12 FR-71: inject the Harness-owned prompt assembler so agents do
+	// not maintain a second assembly path.
+	if setter, ok := agent.(interface{ SetPromptPreparer(agents.PromptPreparer) }); ok {
+		setter.SetPromptPreparer(e.preparePrompt)
+	}
 	findings, err := agent.Review(runCtx, runInput)
 	result.Findings = findings
 	result.ToolCallCount = recorder.count()
@@ -193,18 +193,39 @@ func (e *Executor) Execute(ctx context.Context, agent agents.ReviewAgent, input 
 		result.Status = StatusPartial
 		result.ErrorReason = ErrorReasonNoToolCalls
 	}
+	// v1.12 FR-73: completed findings must cite files the agent actually
+	// read successfully. Findings are preserved and marked, not dropped.
+	if result.Status == StatusCompleted && len(result.Findings) > 0 {
+		unverified := false
+		for i := range result.Findings {
+			filePath := strings.TrimSpace(result.Findings[i].FilePath)
+			if filePath == "" {
+				e.logger.Sugar().Warnw("finding has no file_path, citation gate skipped",
+					"agent", agent.Name(), "message", result.Findings[i].Message)
+				continue
+			}
+			if !readPaths.Has(filePath) {
+				result.Findings[i].UnverifiedCitation = true
+				unverified = true
+			}
+		}
+		if unverified {
+			result.Status = StatusPartial
+			result.ErrorReason = ErrorReasonUnverifiedCitation
+		}
+	}
 	return result, nil
 }
 
 // governTools copies the tool slice and wraps every tool with the Harness
 // governance layer.
-func (e *Executor) governTools(tools []ltools.Tool, rec *recorder) []ltools.Tool {
+func (e *Executor) governTools(tools []ltools.Tool, rec *recorder, readPaths ReadSet) []ltools.Tool {
 	out := make([]ltools.Tool, 0, len(tools))
 	for _, tool := range tools {
 		if tool == nil {
 			continue
 		}
-		out = append(out, &governedTool{inner: tool, executor: e, recorder: rec})
+		out = append(out, &governedTool{inner: tool, executor: e, recorder: rec, readSet: readPaths})
 	}
 	return out
 }
@@ -246,6 +267,7 @@ type governedTool struct {
 	inner    ltools.Tool
 	executor *Executor
 	recorder *recorder
+	readSet  ReadSet
 }
 
 // Compile-time check that governedTool implements tools.Tool.
@@ -310,6 +332,9 @@ func (t *governedTool) Call(ctx context.Context, input string) (string, error) {
 	}
 
 	entry.Success = callErr == nil
+	if entry.Success && toolName == "read_file" && t.readSet != nil {
+		t.readSet.Add(input)
+	}
 	t.recorder.add(entry)
 
 	if err := DetectOscillation(t.recorder.snapshot()); err != nil {

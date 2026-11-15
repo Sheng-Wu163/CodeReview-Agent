@@ -34,11 +34,19 @@ type Config struct {
 	// Compression configures the v1.9 context assembly and memory
 	// compression pipeline (FR-52..FR-55).
 	Compression CompressionConfig `mapstructure:"compression"`
+	// Verifier configures the adversarial verification step (v1.12 FR-72).
+	Verifier VerifierConfig `mapstructure:"verifier"`
 	// ForceRerun ignores all stored agent checkpoints (v1.8.1 FR-60).
 	ForceRerun bool `mapstructure:"force_rerun"`
 	// ForceRerunAgents lists agents whose checkpoints must be ignored even
 	// when ForceRerun is false (v1.8.1 FR-60).
 	ForceRerunAgents []string `mapstructure:"force_rerun_agents"`
+}
+
+// VerifierConfig controls the adversarial verifier (v1.12 FR-72).
+type VerifierConfig struct {
+	// Enabled requires a real LLM-backed verifier at startup.
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // CompressionConfig holds the v1.9 dual-track compression thresholds and
@@ -116,6 +124,9 @@ type AdaptiveConfig struct {
 	ComplexMinFiles int `mapstructure:"complex_min_files"`
 	// SensitivePaths force the Complex level; empty uses built-in defaults.
 	SensitivePaths []string `mapstructure:"sensitive_paths"`
+	// TrivialVerifier enables the verifier for Trivial PRs (v1.12 FR-72,
+	// default false to preserve the existing cost profile).
+	TrivialVerifier bool `mapstructure:"trivial_verifier"`
 }
 
 // StaticAnalysisTools holds per-tool enable switches.
@@ -155,6 +166,15 @@ type StaticGitleaksRule struct {
 	Keywords []string `mapstructure:"keywords"`
 }
 
+// ValidateVerifier enforces v1.12 FR-72: enabling the verifier requires a
+// real LLM client at startup.
+func (c *Config) ValidateVerifier(llmPresent bool) error {
+	if c.Verifier.Enabled && !llmPresent {
+		return fmt.Errorf("verifier.enabled is true but the LLM client is nil")
+	}
+	return nil
+}
+
 // Load reads configuration from the optional YAML file at configPath and
 // applies environment variable overrides. Environment variables follow the
 // names documented in CLAUDE.md (e.g. WEBHOOK_SECRET, SERVER_PORT).
@@ -186,6 +206,8 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("compression.keep_recent_rounds", 2)
 	v.SetDefault("compression.tool_output_hard_limit", 10000)
 	v.SetDefault("compression.model_context_window", 128000)
+	v.SetDefault("verifier.enabled", true)
+	v.SetDefault("static_analysis.adaptive.trivial_verifier", false)
 	v.SetDefault("force_rerun", false)
 	v.SetDefault("force_rerun_agents", []string{})
 

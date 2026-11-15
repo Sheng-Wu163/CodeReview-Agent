@@ -779,7 +779,7 @@ type FeedbackTracker interface {
 - MODIFIED: REQUEST_CHANGES 判定由"本轮存在 critical"改为"存在未解决的 critical"（FR-69）
 - ADDED: 隐式反馈不直接驱动线程状态，线程 resolve 仅由 FR-63 的 `fixed` 判定或人工操作触发（FR-70）
 
-### v1.12 (规格待审批) — Harness 收口与验证门禁
+### v1.12 (2026-10-23) — Harness 收口与验证门禁
 - MODIFIED: 上下文装配收口为单一路径，`compressingAgent` 与 `Harness.preparePrompt` 合并（FR-71）
 - ADDED: 生产环境启用 Verifier 的 LLM 对抗验证，`cmd/server` 与 `cmd/eval` 不再传入 nil（FR-72）
 - ADDED: Trivial 路径可配置启用验证（`static_analysis.adaptive.trivial_verifier`，默认 false，与现状一致）（FR-72）

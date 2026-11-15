@@ -298,6 +298,72 @@ func TestPreparePromptKeepsPinnedAndRecentBlocks(t *testing.T) {
 	}
 }
 
+// TestExecuteCitationGate covers AC-137/AC-138: completed findings must
+// cite files the agent successfully read.
+func TestExecuteCitationGate(t *testing.T) {
+	tests := []struct {
+		name         string
+		readInput    string
+		findingPath  string
+		wantStatus   AgentStatus
+		wantReason   string
+		wantFlag     bool
+		skipToolCall bool
+	}{
+		{
+			name: "read and cited", readInput: "auth.go", findingPath: "auth.go",
+			wantStatus: StatusCompleted,
+		},
+		{
+			name: "normalized ./ path", readInput: "./auth.go", findingPath: "auth.go",
+			wantStatus: StatusCompleted,
+		},
+		{
+			name: "citation not read", readInput: "main.go", findingPath: "auth.go",
+			wantStatus: StatusPartial, wantReason: ErrorReasonUnverifiedCitation, wantFlag: true,
+		},
+		{
+			name: "empty path skips gate", readInput: "main.go", findingPath: "",
+			wantStatus: StatusCompleted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := &stubTool{name: "read_file"}
+			agent := &scriptedAgent{name: "security", run: func(ctx context.Context, input agents.ReviewInput) ([]agents.AgentFinding, error) {
+				if !tt.skipToolCall {
+					if _, err := input.Tools[0].Call(ctx, tt.readInput); err != nil {
+						return nil, err
+					}
+				}
+				return []agents.AgentFinding{{
+					Agent: "security", Severity: agents.SeverityCritical,
+					FilePath: tt.findingPath, LineNumber: 1, Message: "issue", Confidence: 0.9,
+				}}, nil
+			}}
+
+			h := New(zap.NewNop(), WithRetryPolicy(0, time.Millisecond))
+			res, err := h.Execute(context.Background(), agent, agents.ReviewInput{Tools: []ltools.Tool{tool}})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if res.Status != tt.wantStatus {
+				t.Errorf("Status = %q, want %q (reason %q)", res.Status, tt.wantStatus, res.ErrorReason)
+			}
+			if tt.wantReason != "" && res.ErrorReason != tt.wantReason {
+				t.Errorf("ErrorReason = %q, want %q", res.ErrorReason, tt.wantReason)
+			}
+			if len(res.Findings) != 1 {
+				t.Fatalf("findings = %d, want 1 (findings must be preserved)", len(res.Findings))
+			}
+			if res.Findings[0].UnverifiedCitation != tt.wantFlag {
+				t.Errorf("UnverifiedCitation = %v, want %v", res.Findings[0].UnverifiedCitation, tt.wantFlag)
+			}
+		})
+	}
+}
+
 func TestExecuteRejectsEmptyToolArguments(t *testing.T) {
 	tool := &stubTool{name: "read_file"}
 	agent := &scriptedAgent{name: "logic", run: func(ctx context.Context, input agents.ReviewInput) ([]agents.AgentFinding, error) {
