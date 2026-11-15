@@ -52,6 +52,9 @@ static_analysis:
     sensitive_paths: []         # e.g. ["internal/auth", "migrations"]
     trivial_verifier: false     # v1.12: enable the verifier for Trivial PRs
 
+# v1.14 per-agent tool call budget (FR-79). Non-positive disables the budget.
+max_tool_calls_per_agent: 20
+
 # v1.12 adversarial verifier (FR-72). When enabled, startup requires an LLM.
 verifier:
   enabled: true

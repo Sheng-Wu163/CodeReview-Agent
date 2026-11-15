@@ -132,6 +132,14 @@ type ReviewAgent interface {
 	Review(ctx context.Context, input ReviewInput) ([]AgentFinding, error)
 }
 
+// ToolPolicyProvider is implemented by agents that declare which tools they
+// may invoke (v1.14 FR-77). The Harness enforces the allowlist before a tool
+// executes.
+type ToolPolicyProvider interface {
+	// AllowedTools returns the tool names this agent may call.
+	AllowedTools() []string
+}
+
 // PromptPreparer assembles context blocks into the final prompt. The Harness
 // injects its single preparePrompt implementation so every LLM-bound prompt
 // uses the same assembly and compression path (v1.12 FR-71).
@@ -140,9 +148,10 @@ type PromptPreparer func(ctx context.Context, blocks []ctxcontext.ContextBlock) 
 // reviewAgent is the shared ReAct-based implementation used by all review
 // agents. Each concrete agent only picks a name and a system prompt.
 type reviewAgent struct {
-	name       string
-	promptFile string
-	llm        llms.Model
+	name         string
+	promptFile   string
+	llm          llms.Model
+	allowedTools []string
 	// modelWindow and compression configure the v1.9 in-loop context
 	// compression (FR-53/FR-54). Zero values use the spec defaults.
 	modelWindow int
@@ -151,6 +160,9 @@ type reviewAgent struct {
 	// executions of a shared agent race-free.
 	preparer atomic.Value // stores PromptPreparer
 }
+
+// Compile-time check that reviewAgent implements ToolPolicyProvider.
+var _ ToolPolicyProvider = (*reviewAgent)(nil)
 
 // SetPromptPreparer installs the Harness-owned prompt assembly function
 // (v1.12 FR-71).
@@ -179,11 +191,35 @@ func (a *reviewAgent) SetCompression(modelWindow int, cfg ctxcontext.Compression
 // newReviewAgent creates a review agent identified by name that reasons with
 // the system prompt stored in promptFile.
 func newReviewAgent(name, promptFile string, llm llms.Model) reviewAgent {
-	return reviewAgent{name: name, promptFile: promptFile, llm: llm}
+	return reviewAgent{
+		name:         name,
+		promptFile:   promptFile,
+		llm:          llm,
+		allowedTools: allowedToolsFor(name),
+	}
+}
+
+// allowedToolsFor implements the v1.14 FR-77 tool allocation.
+func allowedToolsFor(name string) []string {
+	switch name {
+	case "security", "logic":
+		return []string{"read_file", "search_code", "get_function_definition"}
+	case "performance":
+		return []string{"read_file", "search_code"}
+	case "lint":
+		return []string{"read_file"}
+	default:
+		return nil
+	}
 }
 
 // Name implements ReviewAgent.
 func (a *reviewAgent) Name() string { return a.name }
+
+// AllowedTools implements ToolPolicyProvider (v1.14 FR-77).
+func (a *reviewAgent) AllowedTools() []string {
+	return append([]string(nil), a.allowedTools...)
+}
 
 // PromptHash returns the SHA-256 of this agent's prompt file, used as the
 // v1.10 checkpoint prompt_hash.

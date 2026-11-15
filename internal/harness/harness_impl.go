@@ -24,7 +24,13 @@ const (
 	defaultToolTimeout    = 30 * time.Second
 	defaultMaxRetries     = 2
 	defaultRetryBaseDelay = 50 * time.Millisecond
+	// DefaultMaxToolCalls is the v1.14 FR-79 per-agent budget.
+	DefaultMaxToolCalls = 20
 )
+
+// ErrToolBudgetExhausted is returned when an agent exceeds its per-run tool
+// call budget (v1.14 FR-79).
+var ErrToolBudgetExhausted = errors.New("harness: tool call budget exhausted")
 
 // Executor is the default Harness implementation. It wraps the agent's tool
 // set, records every logical invocation, enforces the retry policy and
@@ -35,6 +41,7 @@ type Executor struct {
 	toolTimeout    time.Duration
 	maxRetries     int
 	retryBaseDelay time.Duration
+	maxToolCalls   int
 	readOnly       map[string]bool
 	// assembler implements the v1.9 context assembly and compression
 	// pipeline (FR-52..FR-54).
@@ -84,6 +91,12 @@ func WithCompression(modelWindow int, cfg ctxcontext.CompressionConfig) Option {
 	}
 }
 
+// WithMaxToolCalls overrides the per-agent tool call budget (v1.14 FR-79).
+// Zero or negative disables the budget.
+func WithMaxToolCalls(limit int) Option {
+	return func(e *Executor) { e.maxToolCalls = limit }
+}
+
 // WithReadOnlyTools replaces the set of tool names eligible for retries.
 // Read-only tools are the only ones retried in this iteration.
 func WithReadOnlyTools(names ...string) Option {
@@ -106,6 +119,7 @@ func New(logger *zap.Logger, opts ...Option) *Executor {
 		toolTimeout:    defaultToolTimeout,
 		maxRetries:     defaultMaxRetries,
 		retryBaseDelay: defaultRetryBaseDelay,
+		maxToolCalls:   DefaultMaxToolCalls,
 		readOnly: map[string]bool{
 			"read_file":               true,
 			"search_code":             true,
@@ -145,7 +159,8 @@ func (e *Executor) Execute(ctx context.Context, agent agents.ReviewAgent, input 
 	recorder := &recorder{}
 	runInput := input
 	readPaths := newPathReadSet()
-	runInput.Tools = e.governTools(input.Tools, recorder, readPaths)
+	policy := e.toolPolicy(agent)
+	runInput.Tools = e.governTools(input.Tools, recorder, readPaths, policy)
 
 	// v1.12 FR-71: inject the Harness-owned prompt assembler so agents do
 	// not maintain a second assembly path.
@@ -164,6 +179,15 @@ func (e *Executor) Execute(ctx context.Context, agent agents.ReviewAgent, input 
 	if err != nil {
 		result.ErrorReason = err.Error()
 		switch {
+		case errors.Is(err, ErrToolBudgetExhausted):
+			// v1.14 FR-79: the run is interrupted as partial and findings
+			// produced so far are preserved.
+			result.Status = StatusPartial
+			result.ErrorReason = ErrorReasonToolBudgetExhausted
+			e.logger.Sugar().Warnw("agent aborted by tool budget",
+				"agent", agent.Name(), "findings", len(findings),
+				"budget", policy.MaxCalls)
+			return result, fmt.Errorf("%s: %w", agent.Name(), ErrToolBudgetExhausted)
 		case errors.Is(err, ErrOscillation):
 			// 17.4: preserve findings produced before the interruption and
 			// expose the run as partial; a loop without findings is a hard
@@ -221,15 +245,40 @@ func (e *Executor) Execute(ctx context.Context, agent agents.ReviewAgent, input 
 	return result, nil
 }
 
+// toolPolicy builds the v1.14 tool policy for one agent. Agents that do not
+// implement ToolPolicyProvider retain the legacy allow-all behavior.
+func (e *Executor) toolPolicy(agent agents.ReviewAgent) ToolPolicy {
+	policy := ToolPolicy{AgentName: agent.Name(), MaxCalls: e.maxToolCalls}
+	provider, ok := agent.(agents.ToolPolicyProvider)
+	if !ok {
+		return policy
+	}
+	names := provider.AllowedTools()
+	if names == nil {
+		return policy
+	}
+	policy.Allowed = make(map[string]bool, len(names))
+	for _, name := range names {
+		policy.Allowed[name] = true
+	}
+	return policy
+}
+
 // governTools copies the tool slice and wraps every tool with the Harness
 // governance layer.
-func (e *Executor) governTools(tools []ltools.Tool, rec *recorder, readPaths ReadSet) []ltools.Tool {
+func (e *Executor) governTools(tools []ltools.Tool, rec *recorder, readPaths ReadSet, policy ToolPolicy) []ltools.Tool {
 	out := make([]ltools.Tool, 0, len(tools))
 	for _, tool := range tools {
 		if tool == nil {
 			continue
 		}
-		out = append(out, &governedTool{inner: tool, executor: e, recorder: rec, readSet: readPaths})
+		out = append(out, &governedTool{
+			inner:    tool,
+			executor: e,
+			recorder: rec,
+			readSet:  readPaths,
+			policy:   policy,
+		})
 	}
 	return out
 }
@@ -272,6 +321,7 @@ type governedTool struct {
 	executor *Executor
 	recorder *recorder
 	readSet  ReadSet
+	policy   ToolPolicy
 }
 
 // Compile-time check that governedTool implements tools.Tool.
@@ -286,7 +336,10 @@ func (t *governedTool) Description() string { return t.inner.Description() }
 // Call implements tools.Tool.
 func (t *governedTool) Call(ctx context.Context, input string) (string, error) {
 	toolName := t.inner.Name()
-	hash, err := ArgsHash(input)
+	// v1.14 FR-79: normalize path-like arguments for the fingerprint only;
+	// the tool still receives the original input.
+	hashedInput := NormalizeFingerprintArgs(toolName, input)
+	hash, err := ArgsHash(hashedInput)
 	if err != nil {
 		return "", err
 	}
@@ -296,7 +349,23 @@ func (t *governedTool) Call(ctx context.Context, input string) (string, error) {
 		Timestamp: time.Now(),
 	}
 
-	// Validate: reject empty arguments before touching the tool.
+	// Validate stage 1 (v1.14 FR-77): the agent's allowlist is enforced
+	// before any tool code runs.
+	if !t.policy.Allows(toolName) {
+		entry.Success = false
+		t.recorder.add(entry)
+		return "", fmt.Errorf("harness: tool %q is not allowed for agent %q",
+			toolName, t.policy.AgentName)
+	}
+
+	// Validate stage 2 (v1.14 FR-79): enforce the per-agent call budget.
+	if t.policy.MaxCalls > 0 && t.recorder.count() >= t.policy.MaxCalls {
+		entry.Success = false
+		t.recorder.add(entry)
+		return "", fmt.Errorf("harness: %s: %w", toolName, ErrToolBudgetExhausted)
+	}
+
+	// Validate stage 3: reject empty arguments before touching the tool.
 	if strings.TrimSpace(input) == "" {
 		t.recorder.add(entry)
 		return "", fmt.Errorf("harness: %s: empty tool arguments", toolName)

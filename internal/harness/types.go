@@ -14,6 +14,32 @@ import (
 // files the agent never read successfully (v1.12 FR-73).
 const ErrorReasonUnverifiedCitation = "unverified_citation"
 
+// ErrorReasonToolBudgetExhausted marks a partial result interrupted after the
+// agent exceeded max_tool_calls_per_agent (v1.14 FR-79).
+const ErrorReasonToolBudgetExhausted = "tool_budget_exhausted"
+
+// ToolPolicy describes one agent's allowed tools and call budget (v1.14
+// FR-77/FR-79).
+type ToolPolicy struct {
+	// AgentName is the policy owner, used for diagnostics.
+	AgentName string
+	// Allowed is the set of tool names the agent may invoke. A nil map
+	// means the agent did not declare a policy; all tools are allowed for
+	// backward compatibility.
+	Allowed map[string]bool
+	// MaxCalls caps logical tool invocations; zero or negative disables the
+	// per-agent budget.
+	MaxCalls int
+}
+
+// Allows reports whether toolName may execute under this policy.
+func (p ToolPolicy) Allows(toolName string) bool {
+	if p.Allowed == nil {
+		return true
+	}
+	return p.Allowed[toolName]
+}
+
 // ReadSet records the normalized paths successfully read in one execution.
 // It is internal to the Harness and never exposed to agents.
 type ReadSet interface {

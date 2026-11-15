@@ -231,7 +231,9 @@ type Orchestrator struct {
 	// compressionCfg is the v1.9 context/tool-output configuration (set via
 	// SetCompressionConfig).
 	compressionCfg config.CompressionConfig
-	filter         *diff.Filter
+	// maxToolCalls is the v1.14 per-agent tool budget.
+	maxToolCalls int
+	filter       *diff.Filter
 	// agentTimeout bounds each agent's ReAct loop (AC-22: LLM API calls
 	// exceeding 60s mark that agent as failed without affecting others).
 	agentTimeout time.Duration
@@ -263,6 +265,7 @@ func New(logger *zap.Logger, root string, reviewAgents []agents.ReviewAgent, ver
 		verifierFactor: verifierFactory,
 		filter:         filter,
 		agentTimeout:   60 * time.Second,
+		maxToolCalls:   harness.DefaultMaxToolCalls,
 		lastSeen:       make(map[string]time.Time),
 	}
 	o.analysisFactory = func(wsRoot string) AnalysisRunner {
@@ -282,6 +285,7 @@ func New(logger *zap.Logger, root string, reviewAgents []agents.ReviewAgent, ver
 func (o *Orchestrator) newHarness() harness.Harness {
 	return harness.New(o.logger,
 		harness.WithTimeout(o.agentTimeout),
+		harness.WithMaxToolCalls(o.maxToolCalls),
 		harness.WithCompression(o.compressionCfg.ModelContextWindow, ctxcontext.CompressionConfig{
 			TriggerRatio:       o.compressionCfg.TriggerRatio,
 			AbsoluteTokenLimit: o.compressionCfg.AbsoluteTokenLimit,
@@ -301,6 +305,15 @@ func (o *Orchestrator) SetCompressionConfig(cfg config.CompressionConfig) {
 		AbsoluteTokenLimit: cfg.AbsoluteTokenLimit,
 		KeepRecentRounds:   cfg.KeepRecentRounds,
 	})
+}
+
+// SetMaxToolCalls applies the v1.14 per-agent tool call budget. A
+// non-positive value disables the budget. Must be called before Run.
+func (o *Orchestrator) SetMaxToolCalls(limit int) {
+	o.maxToolCalls = limit
+	if o.runner != nil {
+		o.runner = o.newHarness()
+	}
 }
 
 // SetHarness overrides the v1.8 Harness control layer. Tests inject a mock;
@@ -917,6 +930,11 @@ func (o *Orchestrator) buildTools(root string) []ltools.Tool {
 			Root:           root,
 			MaxOutputChars: o.compressionCfg.ToolOutputHardLimit,
 		},
+		tools.SearchCodeTool{
+			Root:           root,
+			MaxOutputChars: o.compressionCfg.ToolOutputHardLimit,
+		},
+		tools.GetFunctionDefTool{Root: root},
 	}
 }
 

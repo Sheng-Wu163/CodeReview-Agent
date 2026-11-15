@@ -110,6 +110,7 @@ func run() error {
 	orch := orchestrator.New(logger, "", reviewAgents, verifierFactory, nil)
 	orch.SetAnalysisConfig(cfg.StaticAnalysis)
 	orch.SetCompressionConfig(cfg.Compression)
+	orch.SetMaxToolCalls(cfg.MaxToolCallsPerAgent)
 	orch.SetCheckpointStore(repository.NewCheckpointRepo(pool))
 	orch.SetCheckpointConfig(cfg.ForceRerun, cfg.ForceRerunAgents)
 	selector := review.NewSelector()

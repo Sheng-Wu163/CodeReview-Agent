@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
+	"strconv"
+	"strings"
 )
 
 // ErrOscillation is returned when an agent keeps repeating the same tool
@@ -37,6 +40,53 @@ func ArgsHash(args string) (string, error) {
 // identity used by the oscillation detector.
 func toolFingerprint(log ToolLog) string {
 	return log.ToolName + ":" + log.ArgsHash
+}
+
+// NormalizeFingerprintArgs cleans path-like arguments before hashing so
+// "./a.go" and "a.go" share one fingerprint (v1.14 FR-79). Only the hash is
+// affected; callers keep passing the original input to the tool.
+func NormalizeFingerprintArgs(toolName, args string) string {
+	maxNumeric := 0
+	switch toolName {
+	case "read_file", "git_blame":
+		maxNumeric = 2
+	case "git_log_file":
+		maxNumeric = 1
+	default:
+		return args
+	}
+
+	trimmed := strings.TrimSpace(args)
+	pathPart, suffix := splitNumericSuffix(trimmed, maxNumeric)
+	normalized := strings.TrimSpace(strings.Trim(pathPart, `"`))
+	normalized = strings.ReplaceAll(normalized, `\`, "/")
+	normalized = path.Clean(normalized)
+	normalized = strings.TrimPrefix(normalized, "./")
+	if normalized == "." {
+		normalized = ""
+	}
+	return normalized + suffix
+}
+
+// splitNumericSuffix separates up to maxSegments trailing ":<int>" segments
+// from a tool argument. It returns the remaining path and the suffix.
+func splitNumericSuffix(args string, maxSegments int) (string, string) {
+	if maxSegments <= 0 {
+		return args, ""
+	}
+	parts := strings.Split(args, ":")
+	numeric := 0
+	for i := len(parts) - 1; i >= 1 && numeric < maxSegments; i-- {
+		if _, err := strconv.Atoi(parts[i]); err != nil {
+			break
+		}
+		numeric++
+	}
+	if numeric == 0 {
+		return args, ""
+	}
+	cut := len(parts) - numeric
+	return strings.Join(parts[:cut], ":"), ":" + strings.Join(parts[cut:], ":")
 }
 
 // DetectOscillation inspects the recorded tool calls and returns

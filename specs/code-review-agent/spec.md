@@ -790,7 +790,7 @@ type FeedbackTracker interface {
 - ADDED: Agent 输出 schema 校验：路径必须在 diff 范围内、行号合法、禁止输出工具调用指令类字段（FR-75）
 - ADDED: 注入回归样本集，纳入 eval 流程（FR-76）
 
-### v1.14 (规格待审批) — 工具面扩展与循环控制增强
+### v1.14 (2026-11-15) — 工具面扩展与循环控制增强
 - ADDED: 工具白名单：每个 Agent 声明可用工具集，Harness 在执行前拒绝越权调用（FR-77）
 - ADDED: 生产注册 `search_code`、`get_function_definition`（FR-77）
 - ADDED: 只读 git 历史工具 `git_blame`、`git_log_file`，仅允许白名单子命令与参数（FR-78）

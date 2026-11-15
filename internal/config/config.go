@@ -36,6 +36,9 @@ type Config struct {
 	Compression CompressionConfig `mapstructure:"compression"`
 	// Verifier configures the adversarial verification step (v1.12 FR-72).
 	Verifier VerifierConfig `mapstructure:"verifier"`
+	// MaxToolCallsPerAgent caps logical tool calls per agent run (v1.14
+	// FR-79, default 20; non-positive disables the budget).
+	MaxToolCallsPerAgent int `mapstructure:"max_tool_calls_per_agent"`
 	// ForceRerun ignores all stored agent checkpoints (v1.8.1 FR-60).
 	ForceRerun bool `mapstructure:"force_rerun"`
 	// ForceRerunAgents lists agents whose checkpoints must be ignored even
@@ -207,6 +210,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("compression.tool_output_hard_limit", 10000)
 	v.SetDefault("compression.model_context_window", 128000)
 	v.SetDefault("verifier.enabled", true)
+	v.SetDefault("max_tool_calls_per_agent", 20)
 	v.SetDefault("static_analysis.adaptive.trivial_verifier", false)
 	v.SetDefault("force_rerun", false)
 	v.SetDefault("force_rerun_agents", []string{})
@@ -220,6 +224,7 @@ func Load(configPath string) (*Config, error) {
 	v.BindEnv("llm_provider", "LLM_PROVIDER")
 	v.BindEnv("openai_api_key", "OPENAI_API_KEY")
 	v.BindEnv("anthropic_api_key", "ANTHROPIC_API_KEY")
+	_ = v.BindEnv("max_tool_calls_per_agent", "MAX_TOOL_CALLS_PER_AGENT")
 
 	if configPath != "" {
 		v.SetConfigFile(configPath)

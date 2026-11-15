@@ -519,20 +519,20 @@
 
 ## v1.14 工具面扩展与循环控制验收
 
-- [ ] AC-143: Given Agent 白名单不含 `git_blame`, When 调用, Then Harness 拒绝且工具未执行。
-- [ ] AC-144: Given 生产 `buildTools`, When 构造, Then 工具列表包含 `search_code` 与 `get_function_definition`。
-- [ ] AC-145: Given `./a.go` 与 `a.go` 交替调用, When 震荡检测, Then 视为同一指纹并中断。
-- [ ] AC-146: Given 单 Agent 工具调用超过 `max_tool_calls_per_agent`, When 继续调用, Then 中断为 `partial`，`ErrorReason = tool_budget_exhausted`。
-- [ ] AC-147: Given `git_blame` 作用于未跟踪文件, When 调用, Then 返回明确错误且不 panic。
-- [ ] AC-148: Given 路径参数以 `-` 或 `--` 开头, When 调用 git 工具, Then 请求被拒绝。
+- [x] AC-143: Given Agent 白名单不含 `git_blame`, When 调用, Then Harness 拒绝且工具未执行。
+- [x] AC-144: Given 生产 `buildTools`, When 构造, Then 工具列表包含 `search_code` 与 `get_function_definition`。
+- [x] AC-145: Given `./a.go` 与 `a.go` 交替调用, When 震荡检测, Then 视为同一指纹并中断。
+- [x] AC-146: Given 单 Agent 工具调用超过 `max_tool_calls_per_agent`, When 继续调用, Then 中断为 `partial`，`ErrorReason = tool_budget_exhausted`。
+- [x] AC-147: Given `git_blame` 作用于未跟踪文件, When 调用, Then 返回明确错误且不 panic。
+- [x] AC-148: Given 路径参数以 `-` 或 `--` 开头, When 调用 git 工具, Then 请求被拒绝。
 
 ## v1.14 迭代交付清单
 
-- [ ] AC-143 ~ AC-148 全部通过
-- [ ] `go build ./...` 通过
-- [ ] `go test ./...` 通过
-- [ ] `spec.md` 的 CHANGELOG 已追加 v1.14
-- [ ] `tasks.md` 中 T83 ~ T87 已标记完成
+- [x] AC-143 ~ AC-148 全部通过
+- [x] `go build ./...` 通过
+- [x] `go test ./...` 通过
+- [x] `spec.md` 的 CHANGELOG 已追加 v1.14
+- [x] `tasks.md` 中 T83 ~ T87 已标记完成
 - [ ] git tag `v1.14-complete` 已打 ← 由用户人工执行
 
 ## v1.15 精确 Token 计量、项目规则与 PR 预算验收
